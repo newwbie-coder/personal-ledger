@@ -1,0 +1,12 @@
+{
+  "$schema": "https://railway.app/railway.schema.json",
+  "build": {
+    "builder": "NIXPACKS",
+    "buildCommand": "npm install && npm run build -w @ledger/db && npm run build -w @ledger/shared && npm run build -w @ledger/license && npm run build -w @ledger/api"
+  },
+  "deploy": {
+    "startCommand": "node scripts/start-platform.mjs",
+    "restartPolicyType": "ON_FAILURE",
+    "restartPolicyMaxRetries": 5
+  }
+}
