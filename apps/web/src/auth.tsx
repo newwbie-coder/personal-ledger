@@ -16,6 +16,8 @@ export interface User {
   name: string;
   username: string;
   role: Role;
+  assigned_firm_id?: string | null;
+  has_pin?: boolean;
 }
 
 export interface WorkspaceInfo {
@@ -30,6 +32,8 @@ interface AuthState {
   loading: boolean;
   login: (workspace: string, username: string, password: string) => Promise<void>;
   logout: () => void;
+  refreshUser: () => Promise<void>;
+  setUserPinFlag: (hasPin: boolean) => void;
 }
 
 const AuthContext = createContext<AuthState | null>(null);
@@ -80,17 +84,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setWorkspaceSlug(result.workspace.slug);
     setUser(result.user);
     setWorkspace(result.workspace);
+    sessionStorage.setItem("ledger_pin_unlocked", "1");
   }, []);
 
   const logout = useCallback(() => {
     setToken(null);
     setUser(null);
     setWorkspace(null);
+    sessionStorage.removeItem("ledger_pin_unlocked");
+  }, []);
+
+  const refreshUser = useCallback(async () => {
+    const me = await api<{ user: User; workspace: WorkspaceInfo }>("/auth/me");
+    setUser(me.user);
+    setWorkspace(me.workspace);
+  }, []);
+
+  const setUserPinFlag = useCallback((hasPin: boolean) => {
+    setUser((prev) => (prev ? { ...prev, has_pin: hasPin } : prev));
   }, []);
 
   const value = useMemo(
-    () => ({ user, workspace, loading, login, logout }),
-    [user, workspace, loading, login, logout],
+    () => ({ user, workspace, loading, login, logout, refreshUser, setUserPinFlag }),
+    [user, workspace, loading, login, logout, refreshUser, setUserPinFlag],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

@@ -13,11 +13,15 @@ export interface AuthUser {
   name: string;
   workspace_id: string;
   workspace_slug: string;
+  assigned_firm_id?: string | null;
+  has_pin?: boolean;
 }
 
 export type AppRequest = Request & {
   user?: AuthUser;
   workspace?: WorkspaceRecord;
+  /** Workspace data encryption key — memory only, never sent to client. */
+  dataKey?: Buffer;
   clientIp?: string;
   clientDevice?: string;
 };

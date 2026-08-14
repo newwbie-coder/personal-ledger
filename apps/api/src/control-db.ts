@@ -45,8 +45,25 @@ export async function ensureControlSchema(): Promise<void> {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
+    ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS wrapped_data_key TEXT;
+
     CREATE INDEX IF NOT EXISTS idx_workspaces_slug ON workspaces (slug);
     CREATE INDEX IF NOT EXISTS idx_workspaces_status ON workspaces (status);
+
+    -- License rows also live here (license service shares Control DB by default)
+    CREATE TABLE IF NOT EXISTS licenses (
+      license_id TEXT PRIMARY KEY,
+      company_uuid UUID UNIQUE,
+      company_name TEXT,
+      maximum_users INT NOT NULL DEFAULT 5,
+      edition TEXT NOT NULL DEFAULT 'standard',
+      status TEXT NOT NULL DEFAULT 'issued'
+        CHECK (status IN ('issued', 'active', 'revoked')),
+      activation_token TEXT,
+      last_validation TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_licenses_status ON licenses (status);
   `);
 }
 

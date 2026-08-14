@@ -160,12 +160,13 @@ setupRouter.post("/initialize", async (req: AppRequest, res) => {
           [data.owner_name, data.owner_username.toLowerCase(), password_hash],
         );
         await client.query(
-          `INSERT INTO app_metadata (id, company_uuid, schema_version, license_id)
-           VALUES (1, $1, $2, $3)
+          `INSERT INTO app_metadata (id, company_uuid, schema_version, license_id, encryption)
+           VALUES (1, $1, $2, $3, 'envelope_v1')
            ON CONFLICT (id) DO UPDATE SET
              company_uuid = EXCLUDED.company_uuid,
              schema_version = EXCLUDED.schema_version,
-             license_id = EXCLUDED.license_id`,
+             license_id = EXCLUDED.license_id,
+             encryption = EXCLUDED.encryption`,
           [company_uuid, schema_version || SCHEMA_VERSION, data.license_id],
         );
         // Ensure a default firm exists (migration 3 also seeds one if empty)

@@ -252,4 +252,57 @@ CREATE INDEX IF NOT EXISTS idx_opening_balances_locked ON opening_balances (lock
 UPDATE app_metadata SET schema_version = 4 WHERE id = 1;
 `,
   },
+  {
+    version: 5,
+    name: "envelope_ciphertext_columns",
+    sql: `
+-- Drop numeric CHECKs before converting amounts to text ciphertext.
+ALTER TABLE ledger_entries DROP CONSTRAINT IF EXISTS ledger_entries_amount_check;
+ALTER TABLE transfers DROP CONSTRAINT IF EXISTS transfers_amount_check;
+
+-- Store sealed fields as text (v2field:…). Legacy NUMERIC values remain readable until migrate.
+ALTER TABLE parties ALTER COLUMN party_name TYPE TEXT USING party_name::text;
+ALTER TABLE parties ALTER COLUMN phone TYPE TEXT USING phone::text;
+
+ALTER TABLE ledger_entries ALTER COLUMN amount TYPE TEXT USING amount::text;
+ALTER TABLE ledger_entries ALTER COLUMN description TYPE TEXT USING description::text;
+
+ALTER TABLE opening_balances ALTER COLUMN balance TYPE TEXT USING balance::text;
+
+ALTER TABLE transfers ALTER COLUMN amount TYPE TEXT USING amount::text;
+ALTER TABLE transfers ALTER COLUMN description TYPE TEXT USING COALESCE(description, '')::text;
+
+ALTER TABLE app_metadata ADD COLUMN IF NOT EXISTS encryption TEXT;
+UPDATE app_metadata SET encryption = COALESCE(encryption, 'none') WHERE id = 1;
+
+UPDATE app_metadata SET schema_version = 5 WHERE id = 1;
+`,
+  },
+  {
+    version: 6,
+    name: "roles_pin_notifications",
+    sql: `
+ALTER TABLE users ADD COLUMN IF NOT EXISTS assigned_firm_id UUID REFERENCES firms(firm_id);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS pin_hash TEXT;
+
+CREATE TABLE IF NOT EXISTS notifications (
+  notification_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(user_id),
+  title TEXT NOT NULL,
+  body TEXT NOT NULL DEFAULT '',
+  entity_type TEXT,
+  entity_id TEXT,
+  read_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_notifications_user_created
+  ON notifications (user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_notifications_unread
+  ON notifications (user_id) WHERE read_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_users_assigned_firm ON users (assigned_firm_id);
+
+UPDATE app_metadata SET schema_version = 6 WHERE id = 1;
+`,
+  },
 ];

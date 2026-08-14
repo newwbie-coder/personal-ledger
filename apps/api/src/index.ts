@@ -10,12 +10,17 @@ import { authRouter } from "./routes/auth.js";
 import { dashboardRouter } from "./routes/dashboard.js";
 import { firmsRouter } from "./routes/firms.js";
 import { ledgerRouter } from "./routes/ledger.js";
+import { notificationsRouter } from "./routes/notifications.js";
 import { openingsRouter } from "./routes/openings.js";
 import { partiesRouter } from "./routes/parties.js";
 import { reportsRouter } from "./routes/reports.js";
 import { setupRouter } from "./routes/setup.js";
 import { transfersRouter } from "./routes/transfers.js";
 import { usersRouter } from "./routes/users.js";
+import {
+  platformAdminRouter,
+  workspaceAdminRouter,
+} from "./routes/workspace-admin.js";
 import { countWorkspaces } from "./workspaces.js";
 
 /** Railway/Render set PORT; local defaults to API_PORT or 4000. */
@@ -72,6 +77,9 @@ v1.use("/ledger", ledgerRouter);
 v1.use("/transfers", transfersRouter);
 v1.use("/dashboard", dashboardRouter);
 v1.use("/reports", reportsRouter);
+v1.use("/notifications", notificationsRouter);
+v1.use("/workspace", workspaceAdminRouter);
+v1.use("/admin", platformAdminRouter);
 
 app.use("/api/v1", v1);
 

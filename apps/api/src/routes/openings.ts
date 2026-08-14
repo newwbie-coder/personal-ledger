@@ -2,9 +2,11 @@ import { Router } from "express";
 import { z } from "zod";
 import { writeAudit } from "../audit.js";
 import { requireAuth, requireRoles, type AppRequest } from "../auth.js";
+import { findPartyIdByName } from "../balances.js";
+import { openAmount, openText, sealAmount, sealField } from "../data-crypto.js";
 import { queryWorkspace, withTransaction } from "../db.js";
 import { requireActiveFirm } from "../firms.js";
-import { requireLicense } from "../middleware.js";
+import { requireDataKey, requireLicense } from "../middleware.js";
 
 export const openingsRouter = Router();
 
@@ -12,6 +14,7 @@ openingsRouter.use(requireAuth, requireLicense);
 
 openingsRouter.get("/", requireRoles("owner", "manager"), async (req: AppRequest, res) => {
   const firmId = typeof req.query.firm_id === "string" ? req.query.firm_id : null;
+  const dek = req.dataKey ?? null;
   const params: unknown[] = [];
   let firmClause = "";
   if (firmId) {
@@ -27,14 +30,15 @@ openingsRouter.get("/", requireRoles("owner", "manager"), async (req: AppRequest
      JOIN parties p ON p.party_id = o.party_id
      JOIN firms f ON f.firm_id = o.firm_id
      WHERE 1=1 ${firmClause}
-     ORDER BY p.party_name ASC, f.created_at ASC`,
+     ORDER BY f.created_at ASC`,
     params,
   );
 
   res.json({
     openings: result.rows.map((r) => ({
       ...r,
-      balance: Number(r.balance),
+      party_name: openText(dek, r.party_name),
+      balance: openAmount(dek, r.balance),
       effective_date: r.effective_date
         ? new Date(r.effective_date).toISOString().slice(0, 10)
         : null,
@@ -64,7 +68,7 @@ const upsertSchema = z.object({
   effective_date: z.string().optional(),
 });
 
-openingsRouter.put("/", requireRoles("owner", "manager"), async (req: AppRequest, res) => {
+openingsRouter.put("/", requireDataKey, requireRoles("owner", "manager"), async (req: AppRequest, res) => {
   const parsed = upsertSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.flatten() });
@@ -79,6 +83,7 @@ openingsRouter.put("/", requireRoles("owner", "manager"), async (req: AppRequest
     return;
   }
 
+  const dek = req.dataKey!;
   try {
     const row = await withTransaction(req.workspace!, async (client) => {
       let firmId = parsed.data.firm_id;
@@ -96,25 +101,22 @@ openingsRouter.put("/", requireRoles("owner", "manager"), async (req: AppRequest
         }
         firmId = firm.rows[0].firm_id as string;
       }
-      if (!firmId) {
-        throw Object.assign(new Error("firm_id or firm_name required"), { status: 400 });
-      }
-      await requireActiveFirm(req.workspace!, firmId, client);
+      await requireActiveFirm(req.workspace!, firmId!, client);
 
       let partyId = parsed.data.party_id;
       if (!partyId) {
-        const existing = await client.query(
-          `SELECT party_id FROM parties WHERE LOWER(party_name) = LOWER($1) LIMIT 1`,
-          [parsed.data.party_name],
-        );
-        if (existing.rows[0]) {
-          partyId = existing.rows[0].party_id;
-        } else {
+        partyId =
+          (await findPartyIdByName(req.workspace!, dek, parsed.data.party_name!, client)) ??
+          undefined;
+        if (!partyId) {
           const created = await client.query(
             `INSERT INTO parties (party_name, phone, opening_balance, active)
              VALUES ($1, $2, 0, TRUE)
              RETURNING party_id`,
-            [parsed.data.party_name!.trim(), parsed.data.phone?.trim() || null],
+            [
+              sealField(dek, parsed.data.party_name!.trim()),
+              parsed.data.phone?.trim() ? sealField(dek, parsed.data.phone.trim()) : null,
+            ],
           );
           partyId = created.rows[0].party_id;
         }
@@ -165,7 +167,7 @@ openingsRouter.put("/", requireRoles("owner", "manager"), async (req: AppRequest
         [
           partyId,
           firmId,
-          parsed.data.balance,
+          sealAmount(dek, parsed.data.balance),
           parsed.data.effective_date ?? null,
           req.user!.user_id,
         ],
@@ -186,7 +188,7 @@ openingsRouter.put("/", requireRoles("owner", "manager"), async (req: AppRequest
       detail: {
         party_id: row.party_id,
         firm_id: row.firm_id,
-        balance: Number(row.balance),
+        balance: parsed.data.balance,
       },
       ip_address: req.clientIp,
       device: req.clientDevice,
@@ -195,7 +197,7 @@ openingsRouter.put("/", requireRoles("owner", "manager"), async (req: AppRequest
     res.json({
       opening: {
         ...row,
-        balance: Number(row.balance),
+        balance: parsed.data.balance,
         effective_date: new Date(row.effective_date).toISOString().slice(0, 10),
       },
     });
@@ -239,173 +241,171 @@ function parseCsvLine(line: string): string[] {
   return cells;
 }
 
-/** Accept YYYY-MM-DD, DD-MM-YYYY, DD/MM/YYYY (common Excel formats). */
 function normalizeEffectiveDate(raw: string | undefined): string | null {
   if (!raw?.trim()) return null;
   const s = raw.trim();
   if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
   const dmy = s.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/);
   if (dmy) {
-    const day = dmy[1].padStart(2, "0");
-    const month = dmy[2].padStart(2, "0");
-    const year = dmy[3];
-    return `${year}-${month}-${day}`;
+    return `${dmy[3]}-${dmy[2].padStart(2, "0")}-${dmy[1].padStart(2, "0")}`;
   }
   const parsed = Date.parse(s);
-  if (!Number.isNaN(parsed)) {
-    return new Date(parsed).toISOString().slice(0, 10);
-  }
+  if (!Number.isNaN(parsed)) return new Date(parsed).toISOString().slice(0, 10);
   return null;
 }
 
-openingsRouter.post("/import", requireRoles("owner", "manager"), async (req: AppRequest, res) => {
-  const parsed = importSchema.safeParse(req.body);
-  if (!parsed.success) {
-    res.status(400).json({ error: "csv text required" });
-    return;
-  }
+openingsRouter.post(
+  "/import",
+  requireDataKey,
+  requireRoles("owner", "manager"),
+  async (req: AppRequest, res) => {
+    const parsed = importSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "csv text required" });
+      return;
+    }
+    const dek = req.dataKey!;
 
-  const lines = parsed.data.csv
-    .replace(/^\uFEFF/, "")
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter(Boolean);
-  if (lines.length < 2) {
-    res.status(400).json({ error: "CSV must include a header and at least one data row" });
-    return;
-  }
-
-  const header = parseCsvLine(lines[0]).map((h) => h.toLowerCase().replace(/\s+/g, "_"));
-  const idx = {
-    party_name: header.indexOf("party_name"),
-    firm_name: header.indexOf("firm_name"),
-    opening_balance: header.findIndex((h) =>
-      ["opening_balance", "balance", "amount"].includes(h),
-    ),
-    effective_date: header.indexOf("effective_date"),
-    phone: header.indexOf("phone"),
-  };
-  if (idx.party_name < 0 || idx.firm_name < 0 || idx.opening_balance < 0) {
-    res.status(400).json({
-      error: "CSV header must include party_name, firm_name, opening_balance",
-    });
-    return;
-  }
-
-  const results: Array<{
-    row: number;
-    party_name: string;
-    firm_name: string;
-    ok: boolean;
-    error?: string;
-  }> = [];
-
-  for (let i = 1; i < lines.length; i++) {
-    const cells = parseCsvLine(lines[i]);
-    const party_name = cells[idx.party_name] ?? "";
-    const firm_name = cells[idx.firm_name] ?? "";
-    const balanceRaw = cells[idx.opening_balance] ?? "0";
-    const effective_date =
-      idx.effective_date >= 0
-        ? normalizeEffectiveDate(cells[idx.effective_date] || undefined) ?? undefined
-        : undefined;
-    const phone = idx.phone >= 0 ? cells[idx.phone] || null : null;
-    const balance = Number(String(balanceRaw).replace(/,/g, ""));
-
-    if (!party_name || !firm_name || !Number.isFinite(balance)) {
-      results.push({
-        row: i + 1,
-        party_name,
-        firm_name,
-        ok: false,
-        error: "Invalid party_name, firm_name, or opening_balance",
-      });
-      continue;
+    const lines = parsed.data.csv
+      .replace(/^\uFEFF/, "")
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter(Boolean);
+    if (lines.length < 2) {
+      res.status(400).json({ error: "CSV must include a header and at least one data row" });
+      return;
     }
 
-    try {
-      await withTransaction(req.workspace!, async (client) => {
-        const firm = await client.query(
-          `SELECT firm_id FROM firms
-           WHERE status = 'active' AND LOWER(firm_name) = LOWER($1)
-           LIMIT 1`,
-          [firm_name],
-        );
-        if (!firm.rows[0]) {
-          throw Object.assign(new Error(`Firm not found: ${firm_name}`), { status: 404 });
-        }
-        const firmId = firm.rows[0].firm_id as string;
+    const header = parseCsvLine(lines[0]).map((h) => h.toLowerCase().replace(/\s+/g, "_"));
+    const idx = {
+      party_name: header.indexOf("party_name"),
+      firm_name: header.indexOf("firm_name"),
+      opening_balance: header.findIndex((h) =>
+        ["opening_balance", "balance", "amount"].includes(h),
+      ),
+      effective_date: header.indexOf("effective_date"),
+      phone: header.indexOf("phone"),
+    };
+    if (idx.party_name < 0 || idx.firm_name < 0 || idx.opening_balance < 0) {
+      res.status(400).json({
+        error: "CSV header must include party_name, firm_name, opening_balance",
+      });
+      return;
+    }
 
-        let partyId: string;
-        const existing = await client.query(
-          `SELECT party_id FROM parties WHERE LOWER(party_name) = LOWER($1) LIMIT 1`,
-          [party_name],
-        );
-        if (existing.rows[0]) {
-          partyId = existing.rows[0].party_id;
-        } else {
-          const created = await client.query(
-            `INSERT INTO parties (party_name, phone, opening_balance, active)
-             VALUES ($1, $2, 0, TRUE)
-             RETURNING party_id`,
-            [party_name.trim(), phone],
+    const results: Array<{
+      row: number;
+      party_name: string;
+      firm_name: string;
+      ok: boolean;
+      error?: string;
+    }> = [];
+
+    for (let i = 1; i < lines.length; i++) {
+      const cells = parseCsvLine(lines[i]);
+      const party_name = cells[idx.party_name] ?? "";
+      const firm_name = cells[idx.firm_name] ?? "";
+      const balanceRaw = cells[idx.opening_balance] ?? "0";
+      const effective_date =
+        idx.effective_date >= 0
+          ? normalizeEffectiveDate(cells[idx.effective_date] || undefined) ?? undefined
+          : undefined;
+      const phone = idx.phone >= 0 ? cells[idx.phone] || null : null;
+      const balance = Number(String(balanceRaw).replace(/,/g, ""));
+
+      if (!party_name || !firm_name || !Number.isFinite(balance)) {
+        results.push({
+          row: i + 1,
+          party_name,
+          firm_name,
+          ok: false,
+          error: "Invalid party_name, firm_name, or opening_balance",
+        });
+        continue;
+      }
+
+      try {
+        await withTransaction(req.workspace!, async (client) => {
+          const firm = await client.query(
+            `SELECT firm_id FROM firms
+             WHERE status = 'active' AND LOWER(firm_name) = LOWER($1)
+             LIMIT 1`,
+            [firm_name],
           );
-          partyId = created.rows[0].party_id;
-        }
+          if (!firm.rows[0]) {
+            throw Object.assign(new Error(`Firm not found: ${firm_name}`), { status: 404 });
+          }
+          const firmId = firm.rows[0].firm_id as string;
 
-        const current = await client.query(
-          `SELECT locked FROM opening_balances WHERE party_id = $1 AND firm_id = $2 FOR UPDATE`,
-          [partyId, firmId],
-        );
-        if (current.rows[0]?.locked) {
-          throw Object.assign(new Error("Opening balance locked"), { status: 409 });
-        }
-        const hasEntries = await client.query(
-          `SELECT 1 FROM ledger_entries
-           WHERE party_id = $1 AND firm_id = $2 AND entry_kind = 'party' LIMIT 1`,
-          [partyId, firmId],
-        );
-        if (hasEntries.rows[0]) {
-          throw Object.assign(new Error("Opening balance locked (entries exist)"), {
-            status: 409,
-          });
-        }
+          let partyId =
+            (await findPartyIdByName(req.workspace!, dek, party_name, client)) ?? null;
+          if (!partyId) {
+            const created = await client.query(
+              `INSERT INTO parties (party_name, phone, opening_balance, active)
+               VALUES ($1, $2, 0, TRUE)
+               RETURNING party_id`,
+              [
+                sealField(dek, party_name.trim()),
+                phone ? sealField(dek, phone) : null,
+              ],
+            );
+            partyId = created.rows[0].party_id;
+          }
 
-        await client.query(
-          `INSERT INTO opening_balances
-             (party_id, firm_id, balance, effective_date, created_by, locked)
-           VALUES ($1, $2, $3, COALESCE($4::date, CURRENT_DATE), $5, FALSE)
-           ON CONFLICT (party_id, firm_id) DO UPDATE SET
-             balance = EXCLUDED.balance,
-             effective_date = EXCLUDED.effective_date,
-             created_by = EXCLUDED.created_by
-           WHERE opening_balances.locked = FALSE`,
-          [partyId, firmId, balance, effective_date ?? null, req.user!.user_id],
-        );
-      });
-      results.push({ row: i + 1, party_name, firm_name, ok: true });
-    } catch (err: unknown) {
-      results.push({
-        row: i + 1,
-        party_name,
-        firm_name,
-        ok: false,
-        error: err instanceof Error ? err.message : "Import failed",
-      });
+          const current = await client.query(
+            `SELECT locked FROM opening_balances WHERE party_id = $1 AND firm_id = $2 FOR UPDATE`,
+            [partyId, firmId],
+          );
+          if (current.rows[0]?.locked) {
+            throw Object.assign(new Error("Opening balance locked"), { status: 409 });
+          }
+          const hasEntries = await client.query(
+            `SELECT 1 FROM ledger_entries
+             WHERE party_id = $1 AND firm_id = $2 AND entry_kind = 'party' LIMIT 1`,
+            [partyId, firmId],
+          );
+          if (hasEntries.rows[0]) {
+            throw Object.assign(new Error("Opening balance locked (entries exist)"), {
+              status: 409,
+            });
+          }
+
+          await client.query(
+            `INSERT INTO opening_balances
+               (party_id, firm_id, balance, effective_date, created_by, locked)
+             VALUES ($1, $2, $3, COALESCE($4::date, CURRENT_DATE), $5, FALSE)
+             ON CONFLICT (party_id, firm_id) DO UPDATE SET
+               balance = EXCLUDED.balance,
+               effective_date = EXCLUDED.effective_date,
+               created_by = EXCLUDED.created_by
+             WHERE opening_balances.locked = FALSE`,
+            [partyId, firmId, sealAmount(dek, balance), effective_date ?? null, req.user!.user_id],
+          );
+        });
+        results.push({ row: i + 1, party_name, firm_name, ok: true });
+      } catch (err: unknown) {
+        results.push({
+          row: i + 1,
+          party_name,
+          firm_name,
+          ok: false,
+          error: err instanceof Error ? err.message : "Import failed",
+        });
+      }
     }
-  }
 
-  const imported = results.filter((r) => r.ok).length;
-  const failed = results.filter((r) => !r.ok).length;
+    const imported = results.filter((r) => r.ok).length;
+    const failed = results.filter((r) => !r.ok).length;
 
-  await writeAudit(req.workspace!, {
-    actor_user_id: req.user!.user_id,
-    action: "opening.import",
-    entity_type: "opening_balance",
-    detail: { imported, failed },
-    ip_address: req.clientIp,
-    device: req.clientDevice,
-  });
+    await writeAudit(req.workspace!, {
+      actor_user_id: req.user!.user_id,
+      action: "opening.import",
+      entity_type: "opening_balance",
+      detail: { imported, failed },
+      ip_address: req.clientIp,
+      device: req.clientDevice,
+    });
 
-  res.json({ imported, failed, results });
-});
+    res.json({ imported, failed, results });
+  },
+);

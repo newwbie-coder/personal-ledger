@@ -1,15 +1,26 @@
 # Deploy for phone access (Vercel + Railway)
 
-Goal: client opens a public HTTPS URL on their phone and can install the PWA.
+**Live (current)**
+
+| Piece | URL |
+|-------|-----|
+| Phone / PWA | https://ledger-web-ecru.vercel.app |
+| Setup wizard | https://ledger-web-ecru.vercel.app/setup |
+| API | https://api-production-fea9.up.railway.app |
+| Health | https://api-production-fea9.up.railway.app/api/v1/health |
+
+Production license for first cloud workspace: see `.license-production.txt` or `VERIFICATION.md`.
 
 ```
 Phone  →  Vercel (web PWA)
 Phone  →  Railway (API + license)
 Railway → Control Postgres (Supabase)
-Railway → Customer workspace Postgres (your existing Supabase)
+Railway → Customer workspace Postgres (customer Supabase)
 ```
 
 Local Wi‑Fi hosting is optional. This is the real path.
+
+See also: [VERIFICATION.md](VERIFICATION.md) for credentials model + checklist.
 
 ---
 
@@ -17,7 +28,7 @@ Local Wi‑Fi hosting is optional. This is the real path.
 
 1. Accounts: [Railway](https://railway.app) + [Vercel](https://vercel.com) (GitHub login is easiest).
 2. Install Git for Windows if missing: https://git-scm.com/download/win
-3. Push this repo to GitHub (Railway/Vercel deploy from Git).
+3. Push this repo to GitHub (optional — CLI deploy also works).
 
 ---
 
@@ -39,54 +50,43 @@ Local workspace registrations do **not** copy to cloud. After deploy, run **Setu
 
 ## 2) Railway — API + license
 
-1. New Railway project → **Deploy from GitHub** → this repo.
+1. New Railway project → deploy from this repo (or `railway up`).
 2. Root directory: repo root (where `railway.json` lives).
-3. Railway uses `railway.json` (`build:platform` + `start-platform.mjs`).
-4. Generate a public domain for the service (Settings → Networking → Generate Domain).  
-   Example: `https://ledger-api-production.up.railway.app`
+3. Railway uses `railway.json` / `scripts/start-platform.mjs`.
+4. Generate a public domain for the service.
 
 ### Railway variables
 
 ```env
-CONTROL_DATABASE_URL=postgresql://postgres.YOUR_REF:PASSWORD@aws-0-….pooler.supabase.com:5432/postgres
+CONTROL_DATABASE_URL=postgresql://postgres.YOUR_REF:PASSWORD@aws-….pooler.supabase.com:5432/postgres
 JWT_SECRET=long-random-string
 ENCRYPTION_KEY=another-long-random-string
-LICENSE_SERVER_SECRET=dev-license-secret
-LICENSE_ADMIN_SECRET=dev-admin-secret
+LICENSE_SERVER_SECRET=…
+LICENSE_ADMIN_SECRET=…
 LICENSE_PORT=4100
-CORS_ORIGIN=https://YOUR_VERCEL_APP.vercel.app
+CORS_ORIGIN=https://ledger-web-ecru.vercel.app
 ```
-
-After Vercel gives you the URL, set `CORS_ORIGIN` to that exact origin (comma-separated if you have preview + production).
 
 Issue a fresh license after the service is live (from your PC):
 
 ```powershell
-Invoke-RestMethod -Uri "https://YOUR_RAILWAY_DOMAIN/api/v1/setup/issue-license" `
+$secret = (Get-Content .env.production.local | Where-Object { $_ -like "LICENSE_ADMIN_SECRET=*" }).Substring(22)
+Invoke-RestMethod -Uri "https://api-production-fea9.up.railway.app/api/v1/setup/issue-license" `
   -Method POST `
-  -Headers @{ "x-admin-secret" = "YOUR_LICENSE_ADMIN_SECRET"; "Content-Type" = "application/json" } `
+  -Headers @{ "x-admin-secret" = $secret; "Content-Type" = "application/json" } `
   -Body '{"maximum_users":10,"edition":"standard"}'
 ```
 
 Copy the returned `license_id` into `/setup` on Vercel.
 
-Health check: `https://YOUR_RAILWAY_DOMAIN/api/v1/health`
-
 ---
 
 ## 3) Vercel — web PWA
 
-1. New Vercel project → import same GitHub repo.
-2. **Root Directory:** `apps/web`
-3. Framework: Vite (auto).
-4. Build command: `cd ../.. && npm install && npm run build -w @ledger/web`
-5. Output directory: `dist`
-6. Install command: `cd ../.. && npm install` (or leave default if Vercel monorepo detects workspaces)
-
-### Vercel env
+Root: monorepo (`vercel.json` at repo root).
 
 ```env
-VITE_API_URL=https://YOUR_RAILWAY_DOMAIN
+VITE_API_URL=https://api-production-fea9.up.railway.app
 ```
 
 **No trailing slash.** Redeploy after changing this (Vite bakes it in at build time).
@@ -95,7 +95,7 @@ VITE_API_URL=https://YOUR_RAILWAY_DOMAIN
 
 ## 4) First production workspace
 
-1. Open `https://YOUR_VERCEL_APP.vercel.app/setup`
+1. Open https://ledger-web-ecru.vercel.app/setup
 2. New company + new slug
 3. Paste a **new** unused license ID
 4. Connect customer Supabase (Session pooler fields — same as local)
@@ -108,11 +108,18 @@ If customer Supabase already has users from local setup, use a **new username** 
 
 ## 5) Phone checklist
 
-- [ ] Health OK on Railway
-- [ ] Login works on Vercel URL
+- [x] Health OK on Railway
+- [ ] Login works on Vercel URL (after production `/setup`)
 - [ ] Firm selector + add entry
 - [ ] Add to Home Screen
 - [ ] Works off Wi‑Fi (cellular)
+
+---
+
+## Customer backup (short)
+
+- Workspace data: customer backs up **their** Supabase project (`pg_dump` or Supabase backups).
+- Control DB: you back up the small platform Supabase project + keep `ENCRYPTION_KEY` safe offline.
 
 ---
 

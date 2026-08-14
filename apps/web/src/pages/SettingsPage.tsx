@@ -11,6 +11,7 @@ interface AppUser {
   username: string;
   role: string;
   active: boolean;
+  assigned_firm_id?: string | null;
 }
 
 interface LicenseStatus {
@@ -33,12 +34,14 @@ export function SettingsPage() {
   const { refreshFirms } = useFirm();
   const isOwner = user?.role === "owner";
   const canManageFirms = user?.role === "owner" || user?.role === "manager";
+  const canTransfer = canManageFirms;
   const [users, setUsers] = useState<AppUser[]>([]);
   const [license, setLicense] = useState<LicenseStatus | null>(null);
   const [firms, setFirms] = useState<FirmRow[]>([]);
   const [error, setError] = useState("");
   const [showNew, setShowNew] = useState(false);
   const [showNewFirm, setShowNewFirm] = useState(false);
+  const [showTransfer, setShowTransfer] = useState(false);
   const [firmName, setFirmName] = useState("");
   const [resetFor, setResetFor] = useState<string | null>(null);
   const [resetPassword, setResetPassword] = useState("");
@@ -47,9 +50,26 @@ export function SettingsPage() {
     username: "",
     password: "",
     role: "employee",
+    assigned_firm_id: "",
+  });
+  const [transfer, setTransfer] = useState({
+    source_firm_id: "",
+    destination_firm_id: "",
+    amount: "",
+    description: "",
   });
   const [busy, setBusy] = useState(false);
   const [installHint, setInstallHint] = useState(false);
+  const [moveMsg, setMoveMsg] = useState("");
+  const [showMove, setShowMove] = useState(false);
+  const [moveForm, setMoveForm] = useState({
+    host: "",
+    port: "5432",
+    database: "postgres",
+    username: "postgres",
+    password: "",
+    db_provider: "supabase" as "supabase" | "existing" | "self_hosted",
+  });
 
   async function load() {
     try {
@@ -82,9 +102,57 @@ export function SettingsPage() {
     setBusy(true);
     setError("");
     try {
-      await api("/users", { method: "POST", body: JSON.stringify(form) });
+      const payload: Record<string, unknown> = {
+        name: form.name,
+        username: form.username,
+        password: form.password,
+        role: form.role,
+      };
+      if (form.role === "employee") {
+        payload.assigned_firm_id = form.assigned_firm_id || null;
+      }
+      await api("/users", { method: "POST", body: JSON.stringify(payload) });
       setShowNew(false);
-      setForm({ name: "", username: "", password: "", role: "employee" });
+      setForm({ name: "", username: "", password: "", role: "employee", assigned_firm_id: "" });
+      await load();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function createTransfer(e: FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      await api("/transfers", {
+        method: "POST",
+        body: JSON.stringify({
+          source_firm_id: transfer.source_firm_id,
+          destination_firm_id: transfer.destination_firm_id,
+          amount: Number(transfer.amount),
+          description: transfer.description,
+        }),
+      });
+      setTransfer({ source_firm_id: "", destination_firm_id: "", amount: "", description: "" });
+      setShowTransfer(false);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Transfer failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function reassignFirm(userId: string, firmId: string) {
+    setBusy(true);
+    setError("");
+    try {
+      await api(`/users/${userId}/assignment`, {
+        method: "PATCH",
+        body: JSON.stringify({ assigned_firm_id: firmId }),
+      });
       await load();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Failed");
@@ -176,6 +244,77 @@ export function SettingsPage() {
     }
   }
 
+  async function runEncryptMigrate() {
+    if (!confirm("Seal existing ledger fields with license-bound encryption? Safe to re-run.")) {
+      return;
+    }
+    setBusy(true);
+    setError("");
+    setMoveMsg("");
+    try {
+      const r = await api<{ sealed_rows: number; created_dek: boolean }>(
+        "/workspace/encrypt-migrate",
+        { method: "POST", body: "{}" },
+      );
+      setMoveMsg(
+        `Encryption ready. Sealed fields: ${r.sealed_rows}${r.created_dek ? " (new data key created)" : ""}.`,
+      );
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Encrypt migrate failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function testMoveDb() {
+    setBusy(true);
+    setError("");
+    setMoveMsg("");
+    try {
+      await api("/workspace/test-db", {
+        method: "POST",
+        body: JSON.stringify({
+          ...moveForm,
+          port: Number(moveForm.port) || 5432,
+        }),
+      });
+      setMoveMsg("Connection OK. After pg_dump/restore into this DB, use Attach.");
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Test failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function swapMoveDb(e: FormEvent) {
+    e.preventDefault();
+    if (
+      !confirm(
+        "Point this workspace at the new database? Ciphertext must already be copied (see MOVE_DATABASE.md).",
+      )
+    ) {
+      return;
+    }
+    setBusy(true);
+    setError("");
+    setMoveMsg("");
+    try {
+      const r = await api<{ hint?: string }>("/workspace/swap-db", {
+        method: "POST",
+        body: JSON.stringify({
+          ...moveForm,
+          port: Number(moveForm.port) || 5432,
+        }),
+      });
+      setMoveMsg(r.hint ?? "Database attached. Sign out and back in to confirm.");
+      setShowMove(false);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Attach failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <div className="app-shell">
       <div className="page">
@@ -219,7 +358,10 @@ export function SettingsPage() {
             </div>
             <span className="badge badge-accent">{user?.role}</span>
           </div>
-          <button className="btn btn-secondary btn-block" style={{ marginTop: 14 }} type="button" onClick={logout}>
+          <Link to="/account" className="btn btn-secondary btn-block" style={{ marginTop: 14, textDecoration: "none" }}>
+            App PIN &amp; profile
+          </Link>
+          <button className="btn btn-secondary btn-block" style={{ marginTop: 8 }} type="button" onClick={logout}>
             Sign out
           </button>
         </div>
@@ -241,17 +383,82 @@ export function SettingsPage() {
 
         {canManageFirms ? (
           <>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
               <div className="section-title" style={{ margin: "8px 0" }}>Firms</div>
-              <button className="btn btn-secondary btn-sm" type="button" onClick={() => setShowNewFirm((v) => !v)}>
-                {showNewFirm ? "Cancel" : "Add firm"}
-              </button>
+              <div style={{ display: "flex", gap: 8 }}>
+                {canTransfer && firms.filter((f) => f.status === "active").length >= 2 ? (
+                  <button className="btn btn-secondary btn-sm" type="button" onClick={() => setShowTransfer((v) => !v)}>
+                    {showTransfer ? "Cancel" : "Transfer"}
+                  </button>
+                ) : null}
+                {isOwner ? (
+                  <button className="btn btn-secondary btn-sm" type="button" onClick={() => setShowNewFirm((v) => !v)}>
+                    {showNewFirm ? "Cancel" : "Add firm"}
+                  </button>
+                ) : null}
+              </div>
             </div>
             <p className="muted" style={{ fontSize: 13, marginTop: 0, lineHeight: 1.5 }}>
-              After creating a firm, import opening balances from{" "}
-              <Link to="/openings" style={{ color: "inherit" }}>Opening ledger</Link> so existing parties start correctly.
+              {isOwner
+                ? <>After creating a firm, import opening balances from{" "}
+                  <Link to="/openings" style={{ color: "inherit" }}>Opening ledger</Link>.</>
+                : "Managers can post entries and transfers. Only the owner can add firms."}
             </p>
-            {showNewFirm ? (
+            {showTransfer ? (
+              <form className="card-surface" style={{ marginBottom: 12 }} onSubmit={createTransfer}>
+                <div className="field">
+                  <label>From firm</label>
+                  <select
+                    value={transfer.source_firm_id}
+                    onChange={(e) => setTransfer({ ...transfer, source_firm_id: e.target.value })}
+                    required
+                  >
+                    <option value="">Select…</option>
+                    {firms.filter((f) => f.status === "active").map((f) => (
+                      <option key={f.firm_id} value={f.firm_id}>{f.firm_name}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="field">
+                  <label>To firm</label>
+                  <select
+                    value={transfer.destination_firm_id}
+                    onChange={(e) => setTransfer({ ...transfer, destination_firm_id: e.target.value })}
+                    required
+                  >
+                    <option value="">Select…</option>
+                    {firms
+                      .filter((f) => f.status === "active" && f.firm_id !== transfer.source_firm_id)
+                      .map((f) => (
+                        <option key={f.firm_id} value={f.firm_id}>{f.firm_name}</option>
+                      ))}
+                  </select>
+                </div>
+                <div className="field">
+                  <label>Amount</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0.01"
+                    value={transfer.amount}
+                    onChange={(e) => setTransfer({ ...transfer, amount: e.target.value })}
+                    required
+                  />
+                </div>
+                <div className="field">
+                  <label>Note</label>
+                  <input
+                    value={transfer.description}
+                    onChange={(e) => setTransfer({ ...transfer, description: e.target.value })}
+                    placeholder="Optional"
+                  />
+                </div>
+                <button className="btn btn-primary btn-block" disabled={busy} type="submit">
+                  Post transfer
+                </button>
+              </form>
+            ) : null}
+            {showNewFirm && isOwner ? (
               <form className="card-surface" style={{ marginBottom: 12 }} onSubmit={createFirm}>
                 <div className="field">
                   <label>Firm name</label>
@@ -288,6 +495,99 @@ export function SettingsPage() {
 
         {isOwner ? (
           <>
+            <div className="section-title" style={{ margin: "8px 0" }}>Data protection</div>
+            <p className="muted" style={{ fontSize: 13, marginTop: 0, lineHeight: 1.5 }}>
+              Ledger fields are sealed with a license-bound key. Without a valid license activation,
+              database dumps are not useful. Moving host does not require a new license.
+            </p>
+            {moveMsg ? <div className="success-banner">{moveMsg}</div> : null}
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 14 }}>
+              <button className="btn btn-secondary" type="button" disabled={busy} onClick={() => void runEncryptMigrate()}>
+                Seal / migrate encryption
+              </button>
+              <button className="btn btn-secondary" type="button" disabled={busy} onClick={() => setShowMove((v) => !v)}>
+                {showMove ? "Cancel move" : "Move database"}
+              </button>
+            </div>
+            {showMove ? (
+              <form className="card-surface" style={{ marginBottom: 14 }} onSubmit={swapMoveDb}>
+                <p className="field-hint" style={{ marginTop: 0 }}>
+                  1) Copy data with pg_dump/restore (see MOVE_DATABASE.md). 2) Test connection. 3) Attach.
+                  Assisted moves by our team are chargeable when self-serve is impractical.
+                </p>
+                <div className="field">
+                  <label>Provider</label>
+                  <select
+                    value={moveForm.db_provider}
+                    onChange={(e) =>
+                      setMoveForm({
+                        ...moveForm,
+                        db_provider: e.target.value as typeof moveForm.db_provider,
+                      })
+                    }
+                  >
+                    <option value="supabase">Supabase</option>
+                    <option value="existing">Existing PostgreSQL</option>
+                    <option value="self_hosted">Self-hosted</option>
+                  </select>
+                </div>
+                <div className="field">
+                  <label>Host</label>
+                  <input
+                    value={moveForm.host}
+                    onChange={(e) => setMoveForm({ ...moveForm, host: e.target.value })}
+                    required
+                    placeholder="aws-0-….pooler.supabase.com"
+                  />
+                </div>
+                <div className="field">
+                  <label>Port</label>
+                  <input
+                    value={moveForm.port}
+                    onChange={(e) => setMoveForm({ ...moveForm, port: e.target.value })}
+                    required
+                  />
+                </div>
+                <div className="field">
+                  <label>Database</label>
+                  <input
+                    value={moveForm.database}
+                    onChange={(e) => setMoveForm({ ...moveForm, database: e.target.value })}
+                    required
+                  />
+                </div>
+                <div className="field">
+                  <label>Username</label>
+                  <input
+                    value={moveForm.username}
+                    onChange={(e) => setMoveForm({ ...moveForm, username: e.target.value })}
+                    required
+                  />
+                </div>
+                <div className="field">
+                  <label>Password</label>
+                  <input
+                    type="password"
+                    value={moveForm.password}
+                    onChange={(e) => setMoveForm({ ...moveForm, password: e.target.value })}
+                    required
+                  />
+                </div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button className="btn btn-secondary" type="button" disabled={busy} onClick={() => void testMoveDb()}>
+                    Test
+                  </button>
+                  <button className="btn btn-primary" style={{ flex: 1 }} disabled={busy} type="submit">
+                    Attach database
+                  </button>
+                </div>
+              </form>
+            ) : null}
+          </>
+        ) : null}
+
+        {isOwner ? (
+          <>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <div className="section-title" style={{ margin: "8px 0" }}>Users</div>
               <button className="btn btn-secondary btn-sm" type="button" onClick={() => setShowNew((v) => !v)}>
@@ -310,12 +610,30 @@ export function SettingsPage() {
                 </div>
                 <div className="field">
                   <label>Role</label>
-                  <select value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })}>
-                    <option value="employee">Employee</option>
-                    <option value="manager">Manager</option>
+                  <select
+                    value={form.role}
+                    onChange={(e) => setForm({ ...form, role: e.target.value, assigned_firm_id: "" })}
+                  >
+                    <option value="employee">Employee (one firm)</option>
+                    <option value="manager">Manager (all firms)</option>
                     <option value="owner">Owner</option>
                   </select>
                 </div>
+                {form.role === "employee" ? (
+                  <div className="field">
+                    <label>Assigned firm</label>
+                    <select
+                      value={form.assigned_firm_id}
+                      onChange={(e) => setForm({ ...form, assigned_firm_id: e.target.value })}
+                      required
+                    >
+                      <option value="">Choose firm</option>
+                      {firms.filter((f) => f.status === "active").map((f) => (
+                        <option key={f.firm_id} value={f.firm_id}>{f.firm_name}</option>
+                      ))}
+                    </select>
+                  </div>
+                ) : null}
                 <button className="btn btn-primary btn-block" disabled={busy} type="submit">Create</button>
               </form>
             ) : null}
@@ -340,10 +658,25 @@ export function SettingsPage() {
                   <div style={{ minWidth: 0 }}>
                     <div className="row-title">{u.name}</div>
                     <div className="row-sub">{u.username}</div>
-                    <div style={{ display: "flex", gap: 6, marginTop: 7 }}>
+                    <div style={{ display: "flex", gap: 6, marginTop: 7, flexWrap: "wrap" }}>
                       <span className="badge badge-accent">{u.role}</span>
                       {u.active ? null : <span className="badge badge-muted">Inactive</span>}
                     </div>
+                    {u.role === "employee" ? (
+                      <div className="field" style={{ marginTop: 8, marginBottom: 0 }}>
+                        <label style={{ fontSize: 11 }}>Assigned firm</label>
+                        <select
+                          value={u.assigned_firm_id ?? ""}
+                          disabled={busy}
+                          onChange={(e) => void reassignFirm(u.user_id, e.target.value)}
+                        >
+                          <option value="" disabled>Choose firm</option>
+                          {firms.filter((f) => f.status === "active").map((f) => (
+                            <option key={f.firm_id} value={f.firm_id}>{f.firm_name}</option>
+                          ))}
+                        </select>
+                      </div>
+                    ) : null}
                   </div>
                   {u.user_id !== user?.user_id ? (
                     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>

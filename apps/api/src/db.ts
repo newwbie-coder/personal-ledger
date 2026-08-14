@@ -19,6 +19,15 @@ export function getWorkspacePool(workspace: WorkspaceRecord): pg.Pool {
   return pool;
 }
 
+/** Drop cached pool after DB URL swap so next query uses the new host. */
+export function resetWorkspacePool(workspaceId: string) {
+  const existing = pools.get(workspaceId);
+  if (existing) {
+    pools.delete(workspaceId);
+    void existing.end().catch(() => undefined);
+  }
+}
+
 export async function withWorkspaceClient<T>(
   workspace: WorkspaceRecord,
   fn: (client: pg.PoolClient) => Promise<T>,

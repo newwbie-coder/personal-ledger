@@ -223,6 +223,27 @@ Owner can reset employee passwords. Employees cannot reset anyone’s.
 Never ask non-technical users to paste a raw connection URI in the product UI.
 
 Credentials are POSTed once to the API over HTTPS, encrypted into the Control Database, and never returned to the client.
+
+---
+
+# Where credentials live
+
+**Login credentials are not stored on the Control DB as plain passwords.** There are three different credential types:
+
+| What | Where it lives | Who owns it |
+|------|----------------|-------------|
+| **Login** (workspace slug + username + password) | Hashed `password_hash` in the **customer workspace** `users` table | Customer’s Postgres (often Supabase as host) |
+| **JWT** after login | Browser `localStorage` only | Session token signed by your API (`JWT_SECRET`) |
+| **DB connection** (Host/Port/DB/User/Pass) | Encrypted once in **your Control DB** as `encrypted_database_url` | Platform holds the encrypted URI so the API can connect; browser never sees it again |
+| **License** | Separate license service (`licenses` table on Control Postgres) | Platform |
+| **Workspace DEK** | Wrapped on Control DB (`wrapped_data_key`); unlocked only with valid license bind + `DATA_KEY_SECRET` | Platform |
+
+**No Supabase Auth.** Supabase is Postgres hosting only. Auth is bcrypt + JWT in the Express API.
+
+Customer creates a Supabase project → pastes **database** credentials once at workspace setup → their **app login** is created in *that* database’s `users` table. Business fields (party names, amounts, notes) are stored as **ciphertext**; without a valid license activation through the API, dumps are not useful.
+
+See [MOVE_DATABASE.md](MOVE_DATABASE.md) to move a workspace to another Postgres host without re-buying a license.
+
 ---
 
 # API Surface

@@ -18,10 +18,11 @@ export interface Firm {
 
 interface FirmState {
   firms: Firm[];
-  /** null = Workspace Summary (read-only aggregate) */
+  /** null = Workspace Summary (read-only aggregate) — owners/managers only */
   selectedFirmId: string | null;
   selectedFirm: Firm | null;
   isSummary: boolean;
+  firmLocked: boolean;
   setSelectedFirmId: (id: string | null) => void;
   refreshFirms: () => Promise<void>;
   loading: boolean;
@@ -33,6 +34,7 @@ const STORAGE_KEY = "ledger_selected_firm";
 export function FirmProvider({ children }: { children: ReactNode }) {
   const { user } = useAuth();
   const [firms, setFirms] = useState<Firm[]>([]);
+  const [firmLocked, setFirmLocked] = useState(false);
   const [selectedFirmId, setSelectedFirmIdState] = useState<string | null>(() => {
     const saved = localStorage.getItem(STORAGE_KEY);
     return saved && saved !== "summary" ? saved : null;
@@ -40,9 +42,15 @@ export function FirmProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
 
   const refreshFirms = useCallback(async () => {
-    const data = await api<{ firms: Firm[] }>("/firms");
+    const data = await api<{ firms: Firm[]; locked?: boolean }>("/firms");
     setFirms(data.firms);
+    setFirmLocked(Boolean(data.locked));
+
     setSelectedFirmIdState((current) => {
+      if (data.locked && data.firms[0]) {
+        localStorage.setItem(STORAGE_KEY, data.firms[0].firm_id);
+        return data.firms[0].firm_id;
+      }
       if (current && !data.firms.some((f) => f.firm_id === current)) {
         localStorage.setItem(STORAGE_KEY, "summary");
         return null;
@@ -58,6 +66,7 @@ export function FirmProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!user) {
       setFirms([]);
+      setFirmLocked(false);
       setLoading(false);
       return;
     }
@@ -65,7 +74,10 @@ export function FirmProvider({ children }: { children: ReactNode }) {
     setLoading(true);
     refreshFirms()
       .catch(() => {
-        if (!cancelled) setFirms([]);
+        if (!cancelled) {
+          setFirms([]);
+          setFirmLocked(false);
+        }
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -75,10 +87,14 @@ export function FirmProvider({ children }: { children: ReactNode }) {
     };
   }, [user, refreshFirms]);
 
-  const setSelectedFirmId = useCallback((id: string | null) => {
-    setSelectedFirmIdState(id);
-    localStorage.setItem(STORAGE_KEY, id ?? "summary");
-  }, []);
+  const setSelectedFirmId = useCallback(
+    (id: string | null) => {
+      if (firmLocked) return;
+      setSelectedFirmIdState(id);
+      localStorage.setItem(STORAGE_KEY, id ?? "summary");
+    },
+    [firmLocked],
+  );
 
   const selectedFirm = useMemo(
     () => firms.find((f) => f.firm_id === selectedFirmId) ?? null,
@@ -91,11 +107,12 @@ export function FirmProvider({ children }: { children: ReactNode }) {
       selectedFirmId,
       selectedFirm,
       isSummary: selectedFirmId === null,
+      firmLocked,
       setSelectedFirmId,
       refreshFirms,
       loading,
     }),
-    [firms, selectedFirmId, selectedFirm, setSelectedFirmId, refreshFirms, loading],
+    [firms, selectedFirmId, selectedFirm, firmLocked, setSelectedFirmId, refreshFirms, loading],
   );
 
   return <FirmContext.Provider value={value}>{children}</FirmContext.Provider>;

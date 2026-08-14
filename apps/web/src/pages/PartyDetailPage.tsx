@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { BottomNav } from "../components/BottomNav";
 import { FirmSelector } from "../components/FirmSelector";
+import { useAuth } from "../auth";
 import { useFirm } from "../firm";
 import { api, formatDate, money, ApiError } from "../lib/api";
 
@@ -35,11 +36,16 @@ interface Entry {
 
 export function PartyDetailPage() {
   const { id } = useParams();
+  const { user } = useAuth();
   const { selectedFirmId, selectedFirm, isSummary } = useFirm();
+  const canEditParty = user?.role === "owner" || user?.role === "manager";
   const [party, setParty] = useState<Party | null>(null);
   const [entries, setEntries] = useState<Entry[]>([]);
   const [error, setError] = useState("");
   const [showAdd, setShowAdd] = useState(false);
+  const [showEdit, setShowEdit] = useState(false);
+  const [editName, setEditName] = useState("");
+  const [editPhone, setEditPhone] = useState("");
   const [type, setType] = useState<"incoming" | "outgoing">("incoming");
   const [amount, setAmount] = useState("");
   const [description, setDescription] = useState("");
@@ -59,6 +65,8 @@ export function PartyDetailPage() {
       ]);
       setParty(p.party);
       setEntries(e.entries);
+      setEditName(p.party.party_name);
+      setEditPhone(p.party.phone ?? "");
       const firmBal = p.party.firm_balances?.find((fb) => fb.firm_id === selectedFirmId);
       setEditOpening(String(firmBal?.opening_balance ?? 0));
       setEditEffective(firmBal?.effective_date ?? new Date().toISOString().slice(0, 10));
@@ -70,6 +78,7 @@ export function PartyDetailPage() {
 
   useEffect(() => {
     setShowAdd(false);
+    setShowEdit(false);
     void load();
   }, [id, selectedFirmId]);
 
@@ -94,6 +103,27 @@ export function PartyDetailPage() {
       await load();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Failed to add");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveParty(e: FormEvent) {
+    e.preventDefault();
+    if (!id) return;
+    setBusy(true);
+    try {
+      await api(`/parties/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          party_name: editName,
+          phone: editPhone || null,
+        }),
+      });
+      setShowEdit(false);
+      await load();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Could not update party");
     } finally {
       setBusy(false);
     }
@@ -151,13 +181,40 @@ export function PartyDetailPage() {
           Parties
         </Link>
         {party ? (
-          <div className="page-head" style={{ marginTop: 10 }}>
-            <h1 className="page-title">{party.party_name}</h1>
-            {party.phone ? <div className="muted" style={{ marginTop: 4 }}>{party.phone}</div> : null}
+          <div className="page-head" style={{ marginTop: 10, display: "flex", justifyContent: "space-between", gap: 10 }}>
+            <div style={{ minWidth: 0 }}>
+              <h1 className="page-title">{party.party_name}</h1>
+              {party.phone ? <div className="muted" style={{ marginTop: 4 }}>{party.phone}</div> : null}
+            </div>
+            {canEditParty ? (
+              <button
+                className="btn btn-secondary btn-sm"
+                type="button"
+                onClick={() => setShowEdit((v) => !v)}
+              >
+                {showEdit ? "Cancel" : "Edit"}
+              </button>
+            ) : null}
           </div>
         ) : null}
 
         <FirmSelector />
+
+        {showEdit && canEditParty ? (
+          <form className="card-surface" style={{ marginBottom: 12 }} onSubmit={saveParty}>
+            <div className="field">
+              <label>Name</label>
+              <input value={editName} onChange={(e) => setEditName(e.target.value)} required />
+            </div>
+            <div className="field">
+              <label>Phone</label>
+              <input value={editPhone} onChange={(e) => setEditPhone(e.target.value)} />
+            </div>
+            <button className="btn btn-primary btn-block" disabled={busy} type="submit">
+              {busy ? "Saving…" : "Save party"}
+            </button>
+          </form>
+        ) : null}
 
         {party ? (
           <>
@@ -191,7 +248,7 @@ export function PartyDetailPage() {
                 ))}
               </div>
             ) : null}
-            {!isSummary && selectedFirmId ? (
+            {!isSummary && selectedFirmId && canEditParty ? (
               <form className="card-surface" style={{ marginTop: 12 }} onSubmit={saveOpening}>
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 10 }}>
                   <div style={{ fontWeight: 650 }}>Opening balance</div>
@@ -238,7 +295,7 @@ export function PartyDetailPage() {
 
         {isSummary ? (
           <p className="muted" style={{ marginTop: 16, fontSize: 14 }}>
-            Workspace Summary is read-only. Select a firm above to add or reverse entries.
+            Company total is read-only. Select a firm above to add or reverse entries.
           </p>
         ) : (
           <div className="btn-row" style={{ marginTop: 16 }}>
@@ -253,8 +310,8 @@ export function PartyDetailPage() {
             <div className="field">
               <label>Type</label>
               <select value={type} onChange={(e) => setType(e.target.value as "incoming" | "outgoing")}>
-                <option value="incoming">Received (reduces outstanding)</option>
-                <option value="outgoing">Gave / credit (increases outstanding)</option>
+                <option value="incoming">Money in</option>
+                <option value="outgoing">Money out</option>
               </select>
             </div>
             <div className="field">

@@ -18,6 +18,8 @@ export interface User {
   role: UserRole;
   active: boolean;
   created_at: string;
+  assigned_firm_id?: string | null;
+  pin_hash?: string | null;
 }
 
 export interface Firm {
@@ -83,11 +85,23 @@ export interface Transfer {
   created_at: string;
 }
 
+export interface AppNotification {
+  notification_id: string;
+  user_id: string;
+  title: string;
+  body: string;
+  entity_type: string | null;
+  entity_id: string | null;
+  read_at: string | null;
+  created_at: string;
+}
+
 export interface AppMetadata {
   company_uuid: string;
   schema_version: number;
   license_id: string | null;
   created_at: string;
+  encryption?: string | null;
 }
 
 export interface PartyWithBalance extends Party {
@@ -109,6 +123,6 @@ export interface DashboardStats {
   view: "firm" | "workspace_summary";
 }
 
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 6;
 
 export { MIGRATIONS } from "./migrations.js";

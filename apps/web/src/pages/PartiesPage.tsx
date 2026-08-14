@@ -16,8 +16,8 @@ interface Party {
 
 export function PartiesPage() {
   const { user } = useAuth();
-  const { selectedFirmId, selectedFirm, isSummary, firms } = useFirm();
-  const canManage = user?.role === "owner" || user?.role === "manager";
+  const { selectedFirmId, selectedFirm, isSummary, firms, firmLocked } = useFirm();
+  const canOpenings = user?.role === "owner" || user?.role === "manager";
   const [q, setQ] = useState("");
   const [parties, setParties] = useState<Party[]>([]);
   const [error, setError] = useState("");
@@ -90,16 +90,16 @@ export function PartiesPage() {
             <div className="eyebrow">Ledger</div>
             <h1 className="page-title">Parties</h1>
           </div>
-          {canManage ? (
-            <div style={{ display: "flex", gap: 8 }}>
+          <div style={{ display: "flex", gap: 8 }}>
+            {canOpenings ? (
               <Link to="/openings" className="btn btn-secondary btn-sm" style={{ textDecoration: "none" }}>
                 Openings
               </Link>
-              <button className="btn btn-primary btn-sm" type="button" onClick={() => setShowNew((v) => !v)}>
-                {showNew ? "Cancel" : "Add"}
-              </button>
-            </div>
-          ) : null}
+            ) : null}
+            <button className="btn btn-primary btn-sm" type="button" onClick={() => setShowNew((v) => !v)}>
+              {showNew ? "Cancel" : "Add"}
+            </button>
+          </div>
         </div>
 
         <FirmSelector />
@@ -121,15 +121,28 @@ export function PartiesPage() {
             </div>
             <div className="field">
               <label>Opening firm</label>
-              <select value={createFirmId} onChange={(e) => setCreateFirmId(e.target.value)} required>
-                <option value="">Choose firm</option>
-                {firms.map((f) => (
-                  <option key={f.firm_id} value={f.firm_id}>{f.firm_name}</option>
-                ))}
-              </select>
-              <span className="field-hint">
-                Opening balance is recorded against this firm only.
-              </span>
+              {firmLocked || firms.length === 1 ? (
+                <>
+                  <input
+                    value={firms.find((f) => f.firm_id === createFirmId)?.firm_name ?? ""}
+                    disabled
+                    readOnly
+                  />
+                  <span className="field-hint">Opening balance is recorded against this firm.</span>
+                </>
+              ) : (
+                <>
+                  <select value={createFirmId} onChange={(e) => setCreateFirmId(e.target.value)} required>
+                    <option value="">Choose firm</option>
+                    {firms.map((f) => (
+                      <option key={f.firm_id} value={f.firm_id}>{f.firm_name}</option>
+                    ))}
+                  </select>
+                  <span className="field-hint">
+                    Opening balance is recorded against this firm only.
+                  </span>
+                </>
+              )}
             </div>
             <div className="field">
               <label>Opening balance</label>

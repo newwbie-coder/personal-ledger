@@ -1,6 +1,9 @@
 import { Router } from "express";
 import { requireAuth, type AppRequest } from "../auth.js";
+import { computeOutstanding } from "../balances.js";
+import { openAmount } from "../data-crypto.js";
 import { queryWorkspace } from "../db.js";
+import { assertFirmAccess, getAssignedFirmId } from "../firm-access.js";
 import { requireActiveFirm } from "../firms.js";
 import { requireLicense } from "../middleware.js";
 
@@ -9,8 +12,27 @@ export const dashboardRouter = Router();
 dashboardRouter.use(requireAuth, requireLicense);
 
 dashboardRouter.get("/", async (req: AppRequest, res) => {
-  const firmId = typeof req.query.firm_id === "string" ? req.query.firm_id : null;
+  let firmId = typeof req.query.firm_id === "string" ? req.query.firm_id : null;
   let firmName: string | null = null;
+  const dek = req.dataKey ?? null;
+
+  // Employees always see their assigned firm only (no workspace-wide totals).
+  if (req.user!.role === "employee") {
+    const assigned = await getAssignedFirmId(req.workspace!, req.user!.user_id);
+    if (!assigned) {
+      res.status(403).json({ error: "Employee has no assigned firm" });
+      return;
+    }
+    firmId = assigned;
+  } else if (firmId) {
+    try {
+      await assertFirmAccess(req.workspace!, req.user!, firmId);
+    } catch (err: unknown) {
+      const e = err as { status?: number; message?: string };
+      res.status(e.status ?? 403).json({ error: e.message ?? "Forbidden" });
+      return;
+    }
+  }
 
   if (firmId) {
     try {
@@ -30,73 +52,29 @@ dashboardRouter.get("/", async (req: AppRequest, res) => {
     todayFirmClause = `AND firm_id = $1`;
   }
 
-  const today = await queryWorkspace<{
-    today_incoming: string;
-    today_outgoing: string;
-    today_transaction_count: string;
-  }>(
+  const todayRows = await queryWorkspace(
     req.workspace!,
-    `SELECT
-       COALESCE(SUM(CASE WHEN type = 'incoming' THEN amount ELSE 0 END), 0)::text AS today_incoming,
-       COALESCE(SUM(CASE WHEN type = 'outgoing' THEN amount ELSE 0 END), 0)::text AS today_outgoing,
-       COUNT(*)::text AS today_transaction_count
-     FROM ledger_entries
+    `SELECT type, amount FROM ledger_entries
      WHERE (date_time AT TIME ZONE 'UTC')::date = (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date
        ${todayFirmClause}`,
     todayParams,
   );
 
-  // Outstanding = sum of party balances (transfers excluded). Always computed.
-  let outstandingSql: string;
-  const outstandingParams: unknown[] = [];
-  if (firmId) {
-    outstandingParams.push(firmId);
-    outstandingSql = `
-      SELECT COALESCE(SUM(
-        COALESCE(o.balance, 0)
-        + COALESCE((
-          SELECT SUM(CASE WHEN e.type = 'outgoing' THEN e.amount ELSE -e.amount END)
-          FROM ledger_entries e
-          WHERE e.party_id = p.party_id
-            AND e.firm_id = $1
-            AND e.entry_kind = 'party'
-        ), 0)
-      ), 0)::text AS outstanding_balance
-      FROM parties p
-      LEFT JOIN opening_balances o
-        ON o.party_id = p.party_id AND o.firm_id = $1
-      WHERE p.active = TRUE
-    `;
-  } else {
-    outstandingSql = `
-      SELECT COALESCE(SUM(
-        COALESCE((
-          SELECT SUM(o.balance) FROM opening_balances o
-          WHERE o.party_id = p.party_id
-        ), 0)
-        + COALESCE((
-          SELECT SUM(CASE WHEN e.type = 'outgoing' THEN e.amount ELSE -e.amount END)
-          FROM ledger_entries e
-          WHERE e.party_id = p.party_id AND e.entry_kind = 'party'
-        ), 0)
-      ), 0)::text AS outstanding_balance
-      FROM parties p
-      WHERE p.active = TRUE
-    `;
+  let today_incoming = 0;
+  let today_outgoing = 0;
+  for (const row of todayRows.rows) {
+    const amount = openAmount(dek, row.amount);
+    if (row.type === "incoming") today_incoming += amount;
+    else today_outgoing += amount;
   }
 
-  const outstanding = await queryWorkspace<{ outstanding_balance: string }>(
-    req.workspace!,
-    outstandingSql,
-    outstandingParams,
-  );
+  const outstanding_balance = await computeOutstanding(req.workspace!, dek, firmId);
 
-  const row = today.rows[0];
   res.json({
-    today_incoming: Number(row?.today_incoming ?? 0),
-    today_outgoing: Number(row?.today_outgoing ?? 0),
-    outstanding_balance: Number(outstanding.rows[0]?.outstanding_balance ?? 0),
-    today_transaction_count: Number(row?.today_transaction_count ?? 0),
+    today_incoming,
+    today_outgoing,
+    outstanding_balance,
+    today_transaction_count: todayRows.rows.length,
     firm_id: firmId,
     firm_name: firmName,
     view: firmId ? "firm" : "workspace_summary",

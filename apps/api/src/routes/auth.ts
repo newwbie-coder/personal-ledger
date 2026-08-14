@@ -18,6 +18,32 @@ const loginLimiter = rateLimit({
   message: { error: "Too many login attempts. Try again later." },
 });
 
+const pinLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 40,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many PIN attempts. Try again later." },
+});
+
+function publicUser(row: {
+  user_id: string;
+  name: string;
+  username: string;
+  role: UserRole;
+  assigned_firm_id?: string | null;
+  pin_hash?: string | null;
+}) {
+  return {
+    user_id: row.user_id,
+    name: row.name,
+    username: row.username,
+    role: row.role,
+    assigned_firm_id: row.assigned_firm_id ?? null,
+    has_pin: Boolean(row.pin_hash),
+  };
+}
+
 const loginSchema = z.object({
   workspace: z.string().min(1),
   username: z.string().min(1),
@@ -44,9 +70,12 @@ authRouter.post("/login", loginLimiter, async (req: AppRequest, res) => {
     password_hash: string;
     role: UserRole;
     active: boolean;
+    assigned_firm_id: string | null;
+    pin_hash: string | null;
   }>(
     workspace,
-    `SELECT user_id, name, username, password_hash, role, active
+    `SELECT user_id, name, username, password_hash, role, active,
+            assigned_firm_id, pin_hash
      FROM users WHERE LOWER(username) = LOWER($1)`,
     [parsed.data.username],
   );
@@ -63,6 +92,13 @@ authRouter.post("/login", loginLimiter, async (req: AppRequest, res) => {
     return;
   }
 
+  if (user.role === "employee" && !user.assigned_firm_id) {
+    res.status(403).json({
+      error: "Employee has no assigned firm. Ask the owner to assign one.",
+    });
+    return;
+  }
+
   const token = signToken({
     user_id: user.user_id,
     username: user.username,
@@ -70,6 +106,8 @@ authRouter.post("/login", loginLimiter, async (req: AppRequest, res) => {
     name: user.name,
     workspace_id: workspace.workspace_id,
     workspace_slug: workspace.slug,
+    assigned_firm_id: user.assigned_firm_id,
+    has_pin: Boolean(user.pin_hash),
   });
 
   await writeAudit(workspace, {
@@ -83,12 +121,7 @@ authRouter.post("/login", loginLimiter, async (req: AppRequest, res) => {
 
   res.json({
     token,
-    user: {
-      user_id: user.user_id,
-      name: user.name,
-      username: user.username,
-      role: user.role,
-    },
+    user: publicUser(user),
     workspace: {
       workspace_id: workspace.workspace_id,
       slug: workspace.slug,
@@ -98,9 +131,19 @@ authRouter.post("/login", loginLimiter, async (req: AppRequest, res) => {
 });
 
 authRouter.get("/me", requireAuth, async (req: AppRequest, res) => {
-  const result = await queryWorkspace(
+  const result = await queryWorkspace<{
+    user_id: string;
+    name: string;
+    username: string;
+    role: UserRole;
+    active: boolean;
+    created_at: string;
+    assigned_firm_id: string | null;
+    pin_hash: string | null;
+  }>(
     req.workspace!,
-    `SELECT user_id, name, username, role, active, created_at
+    `SELECT user_id, name, username, role, active, created_at,
+            assigned_firm_id, pin_hash
      FROM users WHERE user_id = $1`,
     [req.user!.user_id],
   );
@@ -110,11 +153,62 @@ authRouter.get("/me", requireAuth, async (req: AppRequest, res) => {
     return;
   }
   res.json({
-    user,
+    user: publicUser(user),
     workspace: {
       workspace_id: req.workspace!.workspace_id,
       slug: req.workspace!.slug,
       company_name: req.workspace!.company_name,
     },
   });
+});
+
+const pinSchema = z.object({
+  pin: z.string().regex(/^\d{4,6}$/, "PIN must be 4–6 digits"),
+});
+
+authRouter.post("/pin/set", requireAuth, async (req: AppRequest, res) => {
+  const parsed = pinSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "PIN must be 4–6 digits" });
+    return;
+  }
+  const pin_hash = await bcrypt.hash(parsed.data.pin, 10);
+  await queryWorkspace(
+    req.workspace!,
+    `UPDATE users SET pin_hash = $1 WHERE user_id = $2`,
+    [pin_hash, req.user!.user_id],
+  );
+  await writeAudit(req.workspace!, {
+    actor_user_id: req.user!.user_id,
+    action: "auth.pin_set",
+    entity_type: "user",
+    entity_id: req.user!.user_id,
+    ip_address: req.clientIp,
+    device: req.clientDevice,
+  });
+  res.json({ ok: true, has_pin: true });
+});
+
+authRouter.post("/pin/verify", requireAuth, pinLimiter, async (req: AppRequest, res) => {
+  const parsed = pinSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "PIN must be 4–6 digits" });
+    return;
+  }
+  const result = await queryWorkspace<{ pin_hash: string | null }>(
+    req.workspace!,
+    `SELECT pin_hash FROM users WHERE user_id = $1`,
+    [req.user!.user_id],
+  );
+  const hash = result.rows[0]?.pin_hash;
+  if (!hash) {
+    res.status(400).json({ error: "PIN not set yet" });
+    return;
+  }
+  const ok = await bcrypt.compare(parsed.data.pin, hash);
+  if (!ok) {
+    res.status(401).json({ error: "Wrong PIN" });
+    return;
+  }
+  res.json({ ok: true });
 });

@@ -2,6 +2,7 @@ import { Router } from "express";
 import PDFDocument from "pdfkit";
 import { z } from "zod";
 import { requireAuth, requireRoles, type AppRequest } from "../auth.js";
+import { openAmount, openText } from "../data-crypto.js";
 import { queryWorkspace } from "../db.js";
 import { requireActiveFirm } from "../firms.js";
 import { requireLicense } from "../middleware.js";
@@ -55,6 +56,7 @@ async function loadStatement(
   from?: string,
   to?: string,
 ): Promise<StatementResult | null> {
+  const dek = req.dataKey ?? null;
   let firmName: string | null = null;
   if (firm_id) {
     const firm = await requireActiveFirm(req.workspace!, firm_id);
@@ -71,27 +73,28 @@ async function loadStatement(
     `SELECT party_id, party_name, phone, active FROM parties WHERE party_id = $1`,
     [party_id],
   );
-  const party = partyResult.rows[0];
-  if (!party) return null;
+  const rawParty = partyResult.rows[0];
+  if (!rawParty) return null;
+  const party = {
+    party_id: rawParty.party_id,
+    party_name: openText(dek, rawParty.party_name),
+    phone: rawParty.phone == null || rawParty.phone === "" ? null : openText(dek, rawParty.phone),
+    active: rawParty.active,
+  };
 
   const openingParams: unknown[] = [party_id];
   let openingSql: string;
   if (firm_id) {
     openingParams.push(firm_id);
-    openingSql = `SELECT COALESCE((
-      SELECT balance FROM opening_balances
-      WHERE party_id = $1 AND firm_id = $2
-    ), 0)::text AS opening_balance`;
+    openingSql = `SELECT balance FROM opening_balances WHERE party_id = $1 AND firm_id = $2`;
   } else {
-    openingSql = `SELECT COALESCE((
-      SELECT SUM(balance) FROM opening_balances WHERE party_id = $1
-    ), 0)::text AS opening_balance`;
+    openingSql = `SELECT balance FROM opening_balances WHERE party_id = $1`;
   }
-  const opening = await queryWorkspace<{ opening_balance: string }>(
-    req.workspace!,
-    openingSql,
-    openingParams,
-  );
+  const openingRows = await queryWorkspace(req.workspace!, openingSql, openingParams);
+  let openingBalance = 0;
+  for (const row of openingRows.rows) {
+    openingBalance += openAmount(dek, row.balance);
+  }
 
   const params: unknown[] = [party_id];
   const clauses = [`e.party_id = $1`, `e.entry_kind = 'party'`];
@@ -130,10 +133,9 @@ async function loadStatement(
     params,
   );
 
-  let running = Number(opening.rows[0]?.opening_balance ?? 0);
-  const openingBalance = running;
+  let running = openingBalance;
   const rows: StatementEntry[] = entries.rows.map((e) => {
-    const amount = Number(e.amount);
+    const amount = openAmount(dek, e.amount);
     running += e.type === "outgoing" ? amount : -amount;
     return {
       entry_id: e.entry_id,
@@ -142,7 +144,7 @@ async function loadStatement(
       date_time: e.date_time,
       type: e.type,
       amount,
-      description: e.description,
+      description: openText(dek, e.description ?? ""),
       reverse_of_entry: e.reverse_of_entry,
       created_by_name: e.created_by_name,
       balance_after: running,

@@ -15,7 +15,7 @@ usersRouter.use(requireAuth, requireLicense);
 usersRouter.get("/", requireRoles("owner"), async (req: AppRequest, res) => {
   const result = await queryWorkspace(
     req.workspace!,
-    `SELECT user_id, name, username, role, active, created_at
+    `SELECT user_id, name, username, role, active, created_at, assigned_firm_id
      FROM users ORDER BY created_at ASC`,
   );
   res.json({ users: result.rows });
@@ -26,6 +26,7 @@ const createSchema = z.object({
   username: z.string().min(3).max(64),
   password: z.string().min(6).max(128),
   role: z.enum(["owner", "manager", "employee"]),
+  assigned_firm_id: z.string().uuid().optional().nullable(),
 });
 
 usersRouter.post("/", requireRoles("owner"), async (req: AppRequest, res) => {
@@ -33,6 +34,26 @@ usersRouter.post("/", requireRoles("owner"), async (req: AppRequest, res) => {
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.flatten() });
     return;
+  }
+
+  if (parsed.data.role === "employee" && !parsed.data.assigned_firm_id) {
+    res.status(400).json({ error: "Employees must be assigned to one firm" });
+    return;
+  }
+  if (parsed.data.role !== "employee" && parsed.data.assigned_firm_id) {
+    res.status(400).json({ error: "Only employees use assigned_firm_id" });
+    return;
+  }
+  if (parsed.data.assigned_firm_id) {
+    const firm = await queryWorkspace(
+      req.workspace!,
+      `SELECT firm_id FROM firms WHERE firm_id = $1 AND status = 'active'`,
+      [parsed.data.assigned_firm_id],
+    );
+    if (!firm.rows[0]) {
+      res.status(400).json({ error: "Assigned firm not found or archived" });
+      return;
+    }
   }
 
   const license = await validateWorkspaceLicense(req.workspace!, true);
@@ -50,14 +71,15 @@ usersRouter.post("/", requireRoles("owner"), async (req: AppRequest, res) => {
   try {
     const result = await queryWorkspace(
       req.workspace!,
-      `INSERT INTO users (name, username, password_hash, role, active)
-       VALUES ($1, $2, $3, $4, TRUE)
-       RETURNING user_id, name, username, role, active, created_at`,
+      `INSERT INTO users (name, username, password_hash, role, active, assigned_firm_id)
+       VALUES ($1, $2, $3, $4, TRUE, $5)
+       RETURNING user_id, name, username, role, active, created_at, assigned_firm_id`,
       [
         parsed.data.name,
         parsed.data.username.toLowerCase(),
         password_hash,
         parsed.data.role as UserRole,
+        parsed.data.role === "employee" ? parsed.data.assigned_firm_id : null,
       ],
     );
     const user = result.rows[0];
@@ -66,7 +88,11 @@ usersRouter.post("/", requireRoles("owner"), async (req: AppRequest, res) => {
       action: "user.create",
       entity_type: "user",
       entity_id: user.user_id,
-      detail: { username: user.username, role: user.role },
+      detail: {
+        username: user.username,
+        role: user.role,
+        assigned_firm_id: user.assigned_firm_id,
+      },
       ip_address: req.clientIp,
       device: req.clientDevice,
     });
@@ -79,6 +105,62 @@ usersRouter.post("/", requireRoles("owner"), async (req: AppRequest, res) => {
     }
     throw err;
   }
+});
+
+usersRouter.patch("/:id/assignment", requireRoles("owner"), async (req: AppRequest, res) => {
+  const schema = z.object({
+    assigned_firm_id: z.string().uuid().nullable(),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "assigned_firm_id required (uuid or null)" });
+    return;
+  }
+
+  const target = await queryWorkspace<{ user_id: string; role: UserRole }>(
+    req.workspace!,
+    `SELECT user_id, role FROM users WHERE user_id = $1`,
+    [req.params.id],
+  );
+  if (!target.rows[0]) {
+    res.status(404).json({ error: "User not found" });
+    return;
+  }
+  if (target.rows[0].role !== "employee") {
+    res.status(400).json({ error: "Only employees can be assigned to a firm" });
+    return;
+  }
+  if (!parsed.data.assigned_firm_id) {
+    res.status(400).json({ error: "Employees must keep one assigned firm" });
+    return;
+  }
+
+  const firm = await queryWorkspace(
+    req.workspace!,
+    `SELECT firm_id FROM firms WHERE firm_id = $1 AND status = 'active'`,
+    [parsed.data.assigned_firm_id],
+  );
+  if (!firm.rows[0]) {
+    res.status(400).json({ error: "Assigned firm not found or archived" });
+    return;
+  }
+
+  const result = await queryWorkspace(
+    req.workspace!,
+    `UPDATE users SET assigned_firm_id = $1 WHERE user_id = $2
+     RETURNING user_id, name, username, role, active, created_at, assigned_firm_id`,
+    [parsed.data.assigned_firm_id, req.params.id],
+  );
+  await writeAudit(req.workspace!, {
+    actor_user_id: req.user!.user_id,
+    action: "user.assign_firm",
+    entity_type: "user",
+    entity_id: req.params.id,
+    detail: { assigned_firm_id: parsed.data.assigned_firm_id },
+    ip_address: req.clientIp,
+    device: req.clientDevice,
+  });
+  res.json({ user: result.rows[0] });
 });
 
 usersRouter.patch("/:id/active", requireRoles("owner"), async (req: AppRequest, res) => {

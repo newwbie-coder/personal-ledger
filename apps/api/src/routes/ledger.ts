@@ -2,13 +2,17 @@ import { Router } from "express";
 import { z } from "zod";
 import { writeAudit } from "../audit.js";
 import { requireAuth, type AppRequest } from "../auth.js";
+import { sealAmount, sealField, openAmount } from "../data-crypto.js";
 import { queryWorkspace, withTransaction } from "../db.js";
+import { decryptLedgerRow } from "../field-crypto.js";
 import {
   ensureOpeningBalanceRow,
   lockOpeningBalanceIfNeeded,
   requireActiveFirm,
 } from "../firms.js";
-import { requireLicense } from "../middleware.js";
+import { assertFirmAccess } from "../firm-access.js";
+import { requireDataKey, requireLicense } from "../middleware.js";
+import { notifyOwners } from "../notify.js";
 
 export const ledgerRouter = Router();
 
@@ -50,7 +54,7 @@ ledgerRouter.get("/party/:partyId", async (req: AppRequest, res) => {
   res.json({
     firm_id: firmId,
     view: firmId ? "firm" : "workspace_summary",
-    entries: result.rows.map((r) => ({ ...r, amount: Number(r.amount) })),
+    entries: result.rows.map((r) => decryptLedgerRow(req.dataKey ?? null, r)),
   });
 });
 
@@ -62,14 +66,16 @@ const createSchema = z.object({
   description: z.string().max(500).default(""),
 });
 
-ledgerRouter.post("/entries", async (req: AppRequest, res) => {
+ledgerRouter.post("/entries", requireDataKey, async (req: AppRequest, res) => {
   const parsed = createSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.flatten() });
     return;
   }
+  const dek = req.dataKey!;
 
   try {
+    await assertFirmAccess(req.workspace!, req.user!, parsed.data.firm_id);
     const entry = await withTransaction(req.workspace!, async (client) => {
       await requireActiveFirm(req.workspace!, parsed.data.firm_id, client);
 
@@ -82,11 +88,10 @@ ledgerRouter.post("/entries", async (req: AppRequest, res) => {
         throw Object.assign(new Error("Party is inactive"), { status: 400 });
       }
 
-      // Ensure opening-balance row exists for this firm (zero if never set)
       await ensureOpeningBalanceRow(client, {
         party_id: parsed.data.party_id,
         firm_id: parsed.data.firm_id,
-        balance: 0,
+        balance: sealAmount(dek, 0),
         created_by: req.user!.user_id,
       });
 
@@ -101,8 +106,8 @@ ledgerRouter.post("/entries", async (req: AppRequest, res) => {
           parsed.data.firm_id,
           parsed.data.party_id,
           parsed.data.type,
-          parsed.data.amount,
-          parsed.data.description ?? "",
+          sealAmount(dek, parsed.data.amount),
+          sealField(dek, parsed.data.description ?? ""),
           req.user!.user_id,
         ],
       );
@@ -120,13 +125,26 @@ ledgerRouter.post("/entries", async (req: AppRequest, res) => {
         firm_id: entry.firm_id,
         party_id: entry.party_id,
         type: entry.type,
-        amount: Number(entry.amount),
+        amount: parsed.data.amount,
       },
       ip_address: req.clientIp,
       device: req.clientDevice,
     });
+    await notifyOwners(req.workspace!, {
+      title: entry.type === "incoming" ? "Money in" : "Money out",
+      body: `${req.user!.name} recorded ${parsed.data.amount} (${entry.type})`,
+      entity_type: "ledger_entry",
+      entity_id: entry.entry_id,
+      exclude_user_id: req.user!.user_id,
+    });
 
-    res.status(201).json({ entry: { ...entry, amount: Number(entry.amount) } });
+    res.status(201).json({
+      entry: {
+        ...entry,
+        amount: parsed.data.amount,
+        description: parsed.data.description ?? "",
+      },
+    });
   } catch (err: unknown) {
     const e = err as { status?: number; message?: string };
     if (e.status) {
@@ -137,7 +155,8 @@ ledgerRouter.post("/entries", async (req: AppRequest, res) => {
   }
 });
 
-ledgerRouter.post("/entries/:id/reverse", async (req: AppRequest, res) => {
+ledgerRouter.post("/entries/:id/reverse", requireDataKey, async (req: AppRequest, res) => {
+  const dek = req.dataKey!;
   try {
     const reversal = await withTransaction(req.workspace!, async (client) => {
       const original = await client.query(
@@ -164,6 +183,7 @@ ledgerRouter.post("/entries/:id/reverse", async (req: AppRequest, res) => {
       await requireActiveFirm(req.workspace!, entry.firm_id, client);
 
       const reverseType = entry.type === "incoming" ? "outgoing" : "incoming";
+      const amountPlain = openAmount(dek, entry.amount);
       const description =
         typeof req.body?.description === "string" && req.body.description.trim()
           ? req.body.description.trim()
@@ -180,26 +200,32 @@ ledgerRouter.post("/entries/:id/reverse", async (req: AppRequest, res) => {
           entry.firm_id,
           entry.party_id,
           reverseType,
-          entry.amount,
-          description,
+          sealAmount(dek, amountPlain),
+          sealField(dek, description),
           req.user!.user_id,
           entry.entry_id,
         ],
       );
-      return result.rows[0];
+      return { row: result.rows[0], amountPlain, description };
     });
 
     await writeAudit(req.workspace!, {
       actor_user_id: req.user!.user_id,
       action: "ledger.reverse",
       entity_type: "ledger_entry",
-      entity_id: reversal.entry_id,
-      detail: { reverse_of_entry: req.params.id, firm_id: reversal.firm_id },
+      entity_id: reversal.row.entry_id,
+      detail: { reverse_of_entry: req.params.id, firm_id: reversal.row.firm_id },
       ip_address: req.clientIp,
       device: req.clientDevice,
     });
 
-    res.status(201).json({ entry: { ...reversal, amount: Number(reversal.amount) } });
+    res.status(201).json({
+      entry: {
+        ...reversal.row,
+        amount: reversal.amountPlain,
+        description: reversal.description,
+      },
+    });
   } catch (err: unknown) {
     const e = err as { status?: number; message?: string };
     if (e.status) {

@@ -152,6 +152,7 @@ a {
   min-height: 100dvh;
   display: flex;
   flex-direction: column;
+  padding-top: env(safe-area-inset-top);
   padding-bottom: calc(84px + env(safe-area-inset-bottom));
 }
 
@@ -395,6 +396,8 @@ a {
   border: 1px solid var(--line-strong);
   border-radius: var(--r-md);
   padding: 12px 14px;
+  /* 16px avoids iOS zoom-on-focus */
+  font-size: 16px;
   background: var(--surface-2);
   color: var(--ink);
   transition:
@@ -781,6 +784,149 @@ a.list-row:hover {
   height: 1px;
   background: var(--line);
   margin: 16px 0;
+}
+
+/* ── Home money actions ────────────────────────────────────── */
+
+.home-money-row {
+  margin-top: 18px;
+}
+
+.home-money-btn {
+  min-height: 52px;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.home-money-btn.active-mode {
+  box-shadow: 0 0 0 3px var(--focus);
+}
+
+/* ── PIN gate ──────────────────────────────────────────────── */
+
+.pin-gate {
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  padding: 24px 18px 40px;
+  background:
+    radial-gradient(120% 80% at 10% -10%, color-mix(in srgb, var(--brand-2) 18%, transparent), transparent 55%),
+    radial-gradient(90% 70% at 100% 0%, color-mix(in srgb, var(--accent) 12%, transparent), transparent 50%),
+    var(--bg);
+}
+
+.pin-card {
+  width: min(100%, 380px);
+  padding: 22px 18px 18px;
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow-md);
+  animation: card-in 0.28s var(--ease) both;
+}
+
+.pin-input {
+  letter-spacing: 0.35em;
+  font-size: 22px !important;
+  font-weight: 700;
+  text-align: center;
+}
+
+/* ── Notifications ─────────────────────────────────────────── */
+
+.notif-wrap {
+  position: relative;
+  flex: none;
+}
+
+.notif-bell {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border-radius: 14px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.notif-dot {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--danger);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  display: grid;
+  place-items: center;
+  line-height: 1;
+}
+
+.notif-panel {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  width: min(88vw, 320px);
+  max-height: 360px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow-md);
+  z-index: 40;
+}
+
+.notif-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.notif-list {
+  overflow: auto;
+}
+
+.notif-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 12px 14px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  color: inherit;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.notif-item:last-child {
+  border-bottom: none;
+}
+
+.notif-item.unread {
+  background: var(--brand-tint);
+}
+
+.notif-unread-mark {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-left: 8px;
+  border-radius: 50%;
+  background: var(--brand-2);
+  vertical-align: middle;
 }
 
 @media (prefers-reduced-motion: reduce) {

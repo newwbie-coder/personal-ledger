@@ -1,7 +1,7 @@
 import { type FormEvent, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { BottomNav } from "../components/BottomNav";
-import { FirmSelector } from "../components/FirmSelector";
+import { NotificationBell } from "../components/NotificationBell";
 import { useAuth } from "../auth";
 import { useFirm } from "../firm";
 import { api, ApiError, money } from "../lib/api";
@@ -22,45 +22,44 @@ interface Party {
 
 export function HomePage() {
   const { user, workspace } = useAuth();
-  const { selectedFirmId, selectedFirm, isSummary, firms } = useFirm();
-  const canTransfer = user?.role === "owner" || user?.role === "manager";
+  const { selectedFirmId, firms, firmLocked } = useFirm();
   const [stats, setStats] = useState<Stats | null>(null);
   const [parties, setParties] = useState<Party[]>([]);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
-  const [showAdd, setShowAdd] = useState(false);
-  const [showTransfer, setShowTransfer] = useState(false);
+  const [mode, setMode] = useState<"incoming" | "outgoing" | null>(null);
   const [partyId, setPartyId] = useState("");
   const [entryFirmId, setEntryFirmId] = useState("");
-  const [type, setType] = useState<"incoming" | "outgoing">("incoming");
   const [amount, setAmount] = useState("");
   const [description, setDescription] = useState("");
-  const [sourceFirmId, setSourceFirmId] = useState("");
-  const [destFirmId, setDestFirmId] = useState("");
-  const [transferAmount, setTransferAmount] = useState("");
-  const [transferNote, setTransferNote] = useState("");
   const [busy, setBusy] = useState(false);
 
   async function loadDashboard() {
-    const qs = selectedFirmId ? `?firm_id=${selectedFirmId}` : "";
-    const data = await api<Stats>(`/dashboard${qs}`);
+    // Company-wide total for owners/managers; employees are scoped by API.
+    const data = await api<Stats>("/dashboard");
     setStats(data);
   }
 
   useEffect(() => {
     setError("");
     setSuccess("");
-    setShowAdd(false);
-    setEntryFirmId(selectedFirmId ?? "");
+    setMode(null);
+    const defaultFirm = firmLocked
+      ? selectedFirmId ?? firms[0]?.firm_id ?? ""
+      : firms.length === 1
+        ? firms[0].firm_id
+        : "";
+    setEntryFirmId(defaultFirm);
     Promise.all([
       loadDashboard(),
       api<{ parties: Party[] }>("/parties").then((data) => setParties(data.parties)),
     ]).catch((e) => setError(e instanceof Error ? e.message : "Failed to load"));
-  }, [selectedFirmId]);
+  }, [user?.user_id, firmLocked, selectedFirmId, firms]);
 
   async function addEntry(e: FormEvent) {
     e.preventDefault();
-    const firmId = isSummary ? entryFirmId : selectedFirmId;
+    if (!mode) return;
+    const firmId = entryFirmId || selectedFirmId;
     if (!firmId) {
       setError("Choose a firm for this entry");
       return;
@@ -74,14 +73,15 @@ export function HomePage() {
         body: JSON.stringify({
           firm_id: firmId,
           party_id: partyId,
-          type,
+          type: mode,
           amount: Number(amount),
           description,
         }),
       });
       setAmount("");
       setDescription("");
-      setSuccess("Entry saved");
+      setMode(null);
+      setSuccess(mode === "incoming" ? "Money in saved" : "Money out saved");
       await loadDashboard();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Failed to add entry");
@@ -90,96 +90,60 @@ export function HomePage() {
     }
   }
 
-  async function createTransfer(e: FormEvent) {
-    e.preventDefault();
-    setBusy(true);
-    setError("");
-    setSuccess("");
-    try {
-      await api("/transfers", {
-        method: "POST",
-        body: JSON.stringify({
-          source_firm_id: sourceFirmId,
-          destination_firm_id: destFirmId,
-          amount: Number(transferAmount),
-          description: transferNote,
-        }),
-      });
-      setTransferAmount("");
-      setTransferNote("");
-      setShowTransfer(false);
-      setSuccess("Transfer posted");
-      await loadDashboard();
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Transfer failed");
-    } finally {
-      setBusy(false);
-    }
-  }
-
   return (
     <div className="app-shell">
       <div className="page">
-        <div className="page-head">
-          <div className="eyebrow">{workspace?.company_name ?? "Ledger"}</div>
-          <h1 className="page-title">Hi, {user?.name.split(" ")[0]}</h1>
+        <div className="page-head" style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+          <div style={{ minWidth: 0 }}>
+            <div className="eyebrow">{workspace?.company_name ?? "Ledger"}</div>
+            <h1 className="page-title">Hi, {user?.name.split(" ")[0]}</h1>
+          </div>
+          <NotificationBell />
         </div>
-
-        <FirmSelector />
 
         {error ? <div className="error-banner">{error}</div> : null}
         {success ? <div className="success-banner">{success}</div> : null}
 
         <div className="hero">
-          <div className="hero-label">Outstanding</div>
+          <div className="hero-label">Balance</div>
           <div className="hero-value">{stats ? money(stats.outstanding_balance) : "—"}</div>
           <div className="hero-meta">
-            {isSummary ? "All firms combined" : selectedFirm?.firm_name}
-            {stats ? ` · ${stats.today_transaction_count} entries today` : ""}
+            {user?.role === "employee"
+              ? stats?.firm_name ?? "Your firm"
+              : "All firms combined"}
           </div>
         </div>
 
-        <div className="stat-grid" style={{ marginTop: 12 }}>
-          <div className="stat">
-            <div className="label">Received today</div>
-            <div className="value money-in">{stats ? money(stats.today_incoming) : "—"}</div>
-          </div>
-          <div className="stat">
-            <div className="label">Given today</div>
-            <div className="value money-out">{stats ? money(stats.today_outgoing) : "—"}</div>
-          </div>
-        </div>
-
-        <div className="btn-row" style={{ marginTop: 18 }}>
+        <div className="btn-row home-money-row">
           <button
-            className="btn btn-primary"
+            className={`btn btn-primary home-money-btn${mode === "incoming" ? " active-mode" : ""}`}
             type="button"
             onClick={() => {
-              setShowAdd((v) => !v);
-              setShowTransfer(false);
+              setMode((m) => (m === "incoming" ? null : "incoming"));
               setSuccess("");
             }}
           >
-            {showAdd ? "Cancel" : "Add entry"}
+            Money in
           </button>
-          {canTransfer && firms.length >= 2 ? (
-            <button
-              className="btn btn-secondary"
-              type="button"
-              onClick={() => {
-                setShowTransfer((v) => !v);
-                setShowAdd(false);
-                setSuccess("");
-              }}
-            >
-              {showTransfer ? "Cancel" : "Transfer"}
-            </button>
-          ) : null}
+          <button
+            className={`btn btn-secondary home-money-btn${mode === "outgoing" ? " active-mode" : ""}`}
+            type="button"
+            onClick={() => {
+              setMode((m) => (m === "outgoing" ? null : "outgoing"));
+              setSuccess("");
+            }}
+          >
+            Money out
+          </button>
         </div>
 
-        {showAdd ? (
+        {mode ? (
           <form className="card-surface" style={{ marginTop: 12 }} onSubmit={addEntry}>
-            {isSummary ? (
+            <div style={{ fontWeight: 700, marginBottom: 10 }}>
+              {mode === "incoming" ? "Money in" : "Money out"}
+            </div>
+
+            {!firmLocked && firms.length > 1 ? (
               <div className="field">
                 <label>Firm</label>
                 <select
@@ -189,16 +153,19 @@ export function HomePage() {
                 >
                   <option value="">Choose a firm</option>
                   {firms.map((f) => (
-                    <option key={f.firm_id} value={f.firm_id}>{f.firm_name}</option>
+                    <option key={f.firm_id} value={f.firm_id}>
+                      {f.firm_name}
+                    </option>
                   ))}
                 </select>
-                <span className="field-hint">
-                  Workspace Summary is read-only. Pick one firm to post.
-                </span>
               </div>
             ) : (
               <p className="muted" style={{ marginTop: 0, fontSize: 13 }}>
-                Posting to <strong>{selectedFirm?.firm_name}</strong>
+                Posting to{" "}
+                <strong>
+                  {firms.find((f) => f.firm_id === (entryFirmId || selectedFirmId))?.firm_name ??
+                    "firm"}
+                </strong>
               </p>
             )}
 
@@ -207,7 +174,7 @@ export function HomePage() {
                 <div className="field">
                   <label>Party</label>
                   <select value={partyId} onChange={(e) => setPartyId(e.target.value)} required>
-                    <option value="">Choose an existing party</option>
+                    <option value="">Choose party</option>
                     {parties.map((party) => (
                       <option key={party.party_id} value={party.party_id}>
                         {party.party_name}
@@ -216,65 +183,41 @@ export function HomePage() {
                   </select>
                 </div>
                 <div className="field">
-                  <label>Type</label>
-                  <select value={type} onChange={(e) => setType(e.target.value as "incoming" | "outgoing")}>
-                    <option value="incoming">Received (reduces outstanding)</option>
-                    <option value="outgoing">Gave / credit (increases outstanding)</option>
-                  </select>
-                </div>
-                <div className="field">
                   <label>Amount</label>
-                  <input type="number" inputMode="decimal" step="0.01" min="0.01" value={amount} onChange={(e) => setAmount(e.target.value)} required />
+                  <input
+                    type="number"
+                    inputMode="decimal"
+                    step="0.01"
+                    min="0.01"
+                    value={amount}
+                    onChange={(e) => setAmount(e.target.value)}
+                    required
+                  />
                 </div>
                 <div className="field">
-                  <label>Description</label>
-                  <input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Optional note" />
+                  <label>Note</label>
+                  <input
+                    value={description}
+                    onChange={(e) => setDescription(e.target.value)}
+                    placeholder="Optional"
+                  />
                 </div>
-                <button className="btn btn-primary btn-block" disabled={busy || !partyId} type="submit">
-                  {busy ? "Saving…" : "Save entry"}
+                <button
+                  className="btn btn-primary btn-block"
+                  disabled={busy || !partyId}
+                  type="submit"
+                >
+                  {busy ? "Saving…" : "Save"}
                 </button>
               </>
             ) : (
-              <p className="muted" style={{ marginTop: 0 }}>There are no parties yet.</p>
+              <p className="muted" style={{ marginTop: 0 }}>
+                No parties yet.{" "}
+                <Link to="/parties" style={{ color: "inherit" }}>
+                  Add a party
+                </Link>
+              </p>
             )}
-
-            <Link to="/parties" className="btn btn-ghost btn-block" style={{ marginTop: 10, textDecoration: "none" }}>
-              {parties.length > 0 ? "Manage parties" : "Create a party"}
-            </Link>
-          </form>
-        ) : null}
-
-        {showTransfer ? (
-          <form className="card-surface" style={{ marginTop: 12 }} onSubmit={createTransfer}>
-            <div className="field">
-              <label>From firm</label>
-              <select value={sourceFirmId} onChange={(e) => setSourceFirmId(e.target.value)} required>
-                <option value="">Select…</option>
-                {firms.map((f) => (
-                  <option key={f.firm_id} value={f.firm_id}>{f.firm_name}</option>
-                ))}
-              </select>
-            </div>
-            <div className="field">
-              <label>To firm</label>
-              <select value={destFirmId} onChange={(e) => setDestFirmId(e.target.value)} required>
-                <option value="">Select…</option>
-                {firms.filter((f) => f.firm_id !== sourceFirmId).map((f) => (
-                  <option key={f.firm_id} value={f.firm_id}>{f.firm_name}</option>
-                ))}
-              </select>
-            </div>
-            <div className="field">
-              <label>Amount</label>
-              <input type="number" inputMode="decimal" step="0.01" min="0.01" value={transferAmount} onChange={(e) => setTransferAmount(e.target.value)} required />
-            </div>
-            <div className="field">
-              <label>Description</label>
-              <input value={transferNote} onChange={(e) => setTransferNote(e.target.value)} placeholder="Optional note" />
-            </div>
-            <button className="btn btn-primary btn-block" disabled={busy} type="submit">
-              {busy ? "Posting…" : "Post transfer"}
-            </button>
           </form>
         ) : null}
       </div>

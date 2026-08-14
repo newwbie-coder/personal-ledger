@@ -80,11 +80,14 @@ export async function ensureOpeningBalanceRow(
   input: {
     party_id: string;
     firm_id: string;
-    balance?: number;
+    /** Plain number or already-sealed text. */
+    balance?: number | string;
     effective_date?: string | null;
     created_by?: string | null;
   },
 ) {
+  const balanceValue =
+    typeof input.balance === "string" ? input.balance : String(input.balance ?? 0);
   await client.query(
     `INSERT INTO opening_balances
        (party_id, firm_id, balance, effective_date, created_by, locked)
@@ -93,7 +96,7 @@ export async function ensureOpeningBalanceRow(
     [
       input.party_id,
       input.firm_id,
-      input.balance ?? 0,
+      balanceValue,
       input.effective_date ?? null,
       input.created_by ?? null,
     ],

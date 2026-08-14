@@ -2,6 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { writeAudit } from "../audit.js";
 import { requireAuth, requireRoles, type AppRequest } from "../auth.js";
+import { computeOutstanding } from "../balances.js";
 import { queryWorkspace, withTransaction } from "../db.js";
 import { requireLicense } from "../middleware.js";
 
@@ -11,6 +12,18 @@ firmsRouter.use(requireAuth, requireLicense);
 
 firmsRouter.get("/", async (req: AppRequest, res) => {
   const includeArchived = req.query.include_archived === "true";
+  if (req.user!.role === "employee") {
+    const assigned = await queryWorkspace(
+      req.workspace!,
+      `SELECT f.firm_id, f.firm_name, f.status, f.created_at
+       FROM users u
+       JOIN firms f ON f.firm_id = u.assigned_firm_id
+       WHERE u.user_id = $1 AND f.status = 'active'`,
+      [req.user!.user_id],
+    );
+    res.json({ firms: assigned.rows, locked: true });
+    return;
+  }
   const result = await queryWorkspace(
     req.workspace!,
     `SELECT firm_id, firm_name, status, created_at
@@ -18,14 +31,14 @@ firmsRouter.get("/", async (req: AppRequest, res) => {
      ${includeArchived ? "" : "WHERE status = 'active'"}
      ORDER BY created_at ASC`,
   );
-  res.json({ firms: result.rows });
+  res.json({ firms: result.rows, locked: false });
 });
 
 const createSchema = z.object({
   firm_name: z.string().min(1).max(200),
 });
 
-firmsRouter.post("/", requireRoles("owner", "manager"), async (req: AppRequest, res) => {
+firmsRouter.post("/", requireRoles("owner"), async (req: AppRequest, res) => {
   const parsed = createSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.flatten() });
@@ -72,25 +85,12 @@ firmsRouter.post("/:id/archive", requireRoles("owner"), async (req: AppRequest, 
         throw Object.assign(new Error("Cannot archive the last active firm"), { status: 400 });
       }
 
-      const outstanding = await client.query<{ bal: string }>(
-        `SELECT COALESCE(SUM(bal), 0)::text AS bal FROM (
-           SELECT
-             COALESCE(o.balance, 0)
-             + COALESCE((
-               SELECT SUM(CASE WHEN e.type = 'outgoing' THEN e.amount ELSE -e.amount END)
-               FROM ledger_entries e
-               WHERE e.party_id = p.party_id
-                 AND e.firm_id = $1
-                 AND e.entry_kind = 'party'
-             ), 0) AS bal
-           FROM parties p
-           LEFT JOIN opening_balances o
-             ON o.party_id = p.party_id AND o.firm_id = $1
-           WHERE p.active = TRUE
-         ) x`,
-        [req.params.id],
+      const outstanding = await computeOutstanding(
+        req.workspace!,
+        req.dataKey ?? null,
+        req.params.id,
       );
-      if (Number(outstanding.rows[0]?.bal ?? 0) !== 0) {
+      if (outstanding !== 0) {
         throw Object.assign(
           new Error("Cannot archive firm with open party balances. Settle balances first."),
           { status: 400 },
