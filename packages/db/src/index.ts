@@ -123,6 +123,6 @@ export interface DashboardStats {
   view: "firm" | "workspace_summary";
 }
 
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 7;
 
 export { MIGRATIONS } from "./migrations.js";

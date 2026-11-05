@@ -1,82 +1,50 @@
 # Verification checklist
 
-Tracks from the remaining-work plan. Closing-balance snapshots remain a nice-to-have and are **not** required for v1 sellability.
+Version 2.0: office box, no cloud.
 
-## Credentials (architecture — locked)
+## 1) Proven by the local end-to-end test
 
-| What | Where | Owner |
-|------|--------|--------|
-| App login (slug + user + password) | `users.password_hash` in **customer workspace** Postgres | Customer |
-| JWT | Browser `localStorage` | Signed by API (`JWT_SECRET`) |
-| DB Host/Port/User/Pass | Encrypted as `encrypted_database_url` in **Control DB** | Platform |
-| License | License service | Platform |
+Run against embedded Postgres 18 and system `pg_dump`/`psql` 18 on Windows.
 
-No Supabase Auth. Supabase = Postgres host only.
+Setup and license
+- [x] Fresh box reports `setup_complete: false`
+- [x] Signed license file accepted; a copy with `max_users` edited is rejected
+- [x] Initialize creates company, owner, Main Firm, data key and recovery kit
+- [x] A second initialize is refused (409)
+- [x] Login with username and password only
 
-## 1) Supabase workspace setup
+Ledger
+- [x] Party with opening balance, incoming and outgoing entries, reversal, dashboard balance
 
-### Local (already proven)
+Fingerprint chain
+- [x] Clean chain verifies (5 links, 4 records)
+- [x] Phone checkpoint matches the server head
+- [x] Postgres refuses UPDATE or DELETE on ledger entries and on the chain log, and refuses editing a locked opening balance
+- [x] An edit made with triggers disabled is reported as `altered`
+- [x] Deleting the newest chain link is caught by the phone checkpoint (`ok: false`)
+- [x] The startup check logs `FINGERPRINT CHAIN BROKEN` on a tampered database
 
-- [x] Session pooler connection (not Direct / IPv6-only `db.*.supabase.co`)
-- [x] SSL handled by API (`rejectUnauthorized: false` for cloud hosts)
-- [x] Setup wizard: company → license → provider → discrete DB fields → owner
-- [x] Migrations apply; default firm created; login with new slug/user works
+Backup and restore
+- [x] Encrypted backup written; the file contains no plaintext SQL
+- [x] Restore with the wrong recovery passphrase is refused
+- [x] Restore onto an empty database and an empty data folder recovers the data key and the chain verifies
 
-### Production path (ready now)
+HTTPS
+- [x] Entrypoint issues the CA and a server certificate with the `BOX_HOSTS` addresses; a second start does not reissue
+- [x] HTTPS on 8443 verifies against `ca.crt`; fails without it
+- [x] HTTP on 8080 serves the install page and `ca.crt`, and redirects everything else to HTTPS
+- [x] HSTS, no-sniff and frame-deny headers; SPA fallback serves the web app
 
-| Item | Value |
-|------|--------|
-| Web | https://ledger-web-ecru.vercel.app |
-| Setup | https://ledger-web-ecru.vercel.app/setup |
-| API health | https://api-production-fea9.up.railway.app/api/v1/health |
-| Fresh license | `LIC-787FC24B` (also in `.license-production.txt`, gitignored) |
+## 2) Still needs a human pass
 
-**Do on phone or laptop (once):**
+- [ ] `docker compose up -d --build` on a real Linux box and on Windows with Docker Desktop
+- [ ] `setup-server` and `add-phone` on both; scan the QR on an Android and an iPhone
+- [ ] Install `ca.crt` on both phones (iPhone needs "Certificate Trust Settings" enabled) and open `https://10.8.0.1`
+- [ ] Add to Home Screen, add an entry over mobile data, switch firms, balance-only mode
+- [ ] `remove-phone` cuts the phone off immediately
+- [ ] Leave the box overnight and confirm a `.lbk` file appears in the backup folder
+- [ ] Restore the latest backup onto a second machine using [OFFICE_SETUP.md](OFFICE_SETUP.md)
 
-1. Open `/setup` on the Vercel URL above.
-2. New company + **new** workspace slug.
-3. License: `LIC-787FC24B`
-4. Connect **customer** Supabase via Session pooler fields (same as local).
-5. Create owner → sign in.
-6. Smoke: party + opening, one ledger entry, firm switch, openings import.
+## 3) Retired
 
-If the customer DB already has rows from local setup, use a **new username** or truncate app tables first.
-
-Control DB workspaces count starts at `0` until this production setup completes (expected).
-
-## 2) Mobile / PWA
-
-Public HTTPS replaces LAN/ngrok for client testing.
-
-- [x] Production PWA URL (HTTPS)
-- [x] API URL baked into web build (`VITE_API_URL`)
-- [x] `viewport-fit=cover` + safe-area top/bottom padding
-- [x] 16px inputs (avoids iOS zoom-on-focus)
-- [x] Bottom nav + firm selector + openings file import in UI
-- [ ] Human phone pass: Add to Home Screen, cellular, firm switch, add entry, openings import
-
-## 3) Production deploy
-
-- [x] Control DB = separate Supabase project (Session pooler)
-- [x] Railway: API + license (`start-platform.mjs`)
-- [x] Vercel: web PWA
-- [x] HTTPS both sides
-- [x] Production secrets in Railway / `.env.production.local` (not committed)
-- [x] `CORS_ORIGIN` locked to `https://ledger-web-ecru.vercel.app`
-- [x] Login rate limit (30 / 15 min)
-
-## 4) Hardening / backup guidance
-
-### Customer backup (their workspace DB)
-
-In Supabase: **Project Settings → Database → Backups** (Pro) or periodic `pg_dump` of their project.
-
-Platform never holds ledger rows — if Control DB is lost, customers still have data but must re-register workspace connection (setup again with a new/unused license if needed).
-
-### Platform backup (Control DB)
-
-Back up the small Control Supabase project regularly (workspace metadata + encrypted URIs). Keep `ENCRYPTION_KEY` and `JWT_SECRET` offline — without `ENCRYPTION_KEY`, encrypted DB URLs cannot be decrypted.
-
-### Token strategy
-
-v1 keeps JWT in `localStorage` (PWA-friendly). Cookie/`HttpOnly` is a later upgrade if threat model requires it.
+The Railway API, Vercel web app and Supabase control database from version 1 are no longer used by this code. Shut them down once no customer depends on them.

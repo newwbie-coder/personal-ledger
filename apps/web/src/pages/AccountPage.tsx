@@ -2,9 +2,11 @@ import { FormEvent, useState } from "react";
 import { BottomNav } from "../components/BottomNav";
 import { useAuth } from "../auth";
 import { api, ApiError } from "../lib/api";
+import { useViewMode } from "../view-mode";
 
 export function AccountPage() {
   const { user, logout, setUserPinFlag } = useAuth();
+  const { showBalance } = useViewMode();
   const [pin, setPin] = useState("");
   const [confirm, setConfirm] = useState("");
   const [error, setError] = useState("");
@@ -51,7 +53,10 @@ export function AccountPage() {
             </div>
             <span className="badge badge-accent">{user?.role}</span>
           </div>
-          <button className="btn btn-secondary btn-block" style={{ marginTop: 14 }} type="button" onClick={logout}>
+          <button className="btn btn-secondary btn-block" style={{ marginTop: 14 }} type="button" onClick={showBalance}>
+            Show balance only
+          </button>
+          <button className="btn btn-secondary btn-block" style={{ marginTop: 8 }} type="button" onClick={logout}>
             Sign out
           </button>
         </div>

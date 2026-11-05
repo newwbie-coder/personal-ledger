@@ -278,6 +278,36 @@ a {
   color: rgba(255, 255, 255, 0.78);
 }
 
+.chain-alert {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px;
+  font-size: 14px;
+  line-height: 1.45;
+  color: #fff;
+  background: var(--danger);
+}
+
+.balance-only {
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 14px;
+}
+
+.balance-only .hero {
+  margin: 0;
+}
+
+.balance-only .hero-value {
+  font-size: 40px;
+}
+
 /* ── Buttons ───────────────────────────────────────────────── */
 
 .btn {

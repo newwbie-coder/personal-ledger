@@ -1,0 +1,9 @@
+**/node_modules
+**/dist
+**/*.tsbuildinfo
+.git
+.env*
+data
+apps/api/data
+backups
+wireguard

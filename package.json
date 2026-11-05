@@ -1,20 +1,19 @@
 {
   "name": "collaborative-ledger",
   "private": true,
-  "version": "1.3.0",
+  "version": "2.0.0",
   "workspaces": [
     "apps/*",
     "packages/*"
   ],
   "scripts": {
-    "dev": "npm run dev -w @ledger/api & npm run dev -w @ledger/license & npm run dev -w @ledger/web",
     "dev:api": "npm run dev -w @ledger/api",
     "dev:web": "npm run dev -w @ledger/web",
-    "dev:license": "npm run dev -w @ledger/license",
-    "build": "npm run build -w @ledger/db && npm run build -w @ledger/shared && npm run build -w @ledger/license && npm run build -w @ledger/api && npm run build -w @ledger/web",
-    "build:platform": "npm run build -w @ledger/db && npm run build -w @ledger/shared && npm run build -w @ledger/license && npm run build -w @ledger/api",
-    "start:platform": "node scripts/start-platform.mjs",
-    "migrate": "npm run migrate -w @ledger/api"
+    "build": "npm run build -w @ledger/db && npm run build -w @ledger/shared && npm run build -w @ledger/api && npm run build -w @ledger/web",
+    "start": "npm run start -w @ledger/api",
+    "box": "npm run box -w @ledger/api --",
+    "license:keygen": "node scripts/license/keygen.mjs",
+    "license:issue": "node scripts/license/issue.mjs"
   },
   "engines": {
     "node": ">=20"

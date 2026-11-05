@@ -1,25 +1,17 @@
 import type { NextFunction, Response } from "express";
 import type { AppRequest } from "./auth.js";
-import { validateWorkspaceLicense } from "./license-client.js";
-import { unwrapWorkspaceDek } from "./workspaces.js";
+import { getDataKey } from "./box.js";
 
-/** After auth, ensure workspace license is valid and attach DEK for field crypto. */
-export async function requireLicense(req: AppRequest, res: Response, next: NextFunction) {
+/** After auth, attach the box's data key for field crypto. The license was verified at load. */
+export function requireLicense(req: AppRequest, res: Response, next: NextFunction) {
   if (!req.workspace) {
     res.status(401).json({ error: "Workspace required" });
     return;
   }
-  const result = await validateWorkspaceLicense(req.workspace, false);
-  if (!result.valid) {
-    res.status(403).json({ error: result.error ?? "License invalid", code: "LICENSE_INVALID" });
-    return;
-  }
   try {
-    if (req.workspace.wrapped_data_key) {
-      req.dataKey = unwrapWorkspaceDek(req.workspace);
-    }
+    req.dataKey = getDataKey() ?? undefined;
   } catch (err) {
-    res.status(403).json({
+    res.status(503).json({
       error: err instanceof Error ? err.message : "Cannot unlock workspace data",
       code: "DATA_KEY_INVALID",
     });
@@ -31,7 +23,7 @@ export async function requireLicense(req: AppRequest, res: Response, next: NextF
 export function requireDataKey(req: AppRequest, res: Response, next: NextFunction) {
   if (!req.dataKey) {
     res.status(503).json({
-      error: "Workspace encryption not initialized. Ask support to run data migration.",
+      error: "This box has no data key. Restore it from the recovery kit.",
       code: "DATA_KEY_MISSING",
     });
     return;

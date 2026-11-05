@@ -1,8 +1,9 @@
 @echo off
-REM Start license, API, and web for local development (3 windows)
-start "ledger-license" cmd /k "cd /d %~dp0 && npm run dev -w @ledger/license"
-timeout /t 2 /nobreak >nul
+REM Local development: embedded Postgres, API and web in separate windows.
+REM .env needs DATABASE_URL, CORS_ORIGIN and VITE_API_URL (see .env.example).
+start "ledger-db" cmd /k "cd /d %~dp0 && npm run demo:pg -w @ledger/api"
+timeout /t 6 /nobreak >nul
 start "ledger-api" cmd /k "cd /d %~dp0 && npm run dev -w @ledger/api"
 timeout /t 2 /nobreak >nul
 start "ledger-web" cmd /k "cd /d %~dp0 && npm run dev -w @ledger/web"
-echo Started license :4100, api :4000, web :5173
+echo Started postgres :54329, api :4000, web :5173

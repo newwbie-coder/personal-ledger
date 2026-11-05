@@ -5,7 +5,6 @@ import type { UserRole } from "@ledger/db";
 import { writeAudit } from "../audit.js";
 import { requireAuth, requireRoles, type AppRequest } from "../auth.js";
 import { queryWorkspace } from "../db.js";
-import { validateWorkspaceLicense } from "../license-client.js";
 import { requireLicense } from "../middleware.js";
 
 export const usersRouter = Router();
@@ -56,8 +55,7 @@ usersRouter.post("/", requireRoles("owner"), async (req: AppRequest, res) => {
     }
   }
 
-  const license = await validateWorkspaceLicense(req.workspace!, true);
-  const maxUsers = license.maximum_users ?? 5;
+  const maxUsers = req.workspace!.license.max_users;
   const count = await queryWorkspace<{ count: string }>(
     req.workspace!,
     `SELECT COUNT(*)::text AS count FROM users WHERE active = TRUE`,
@@ -233,13 +231,13 @@ usersRouter.post("/:id/reset-password", requireRoles("owner"), async (req: AppRe
 });
 
 usersRouter.get("/license-status", requireRoles("owner", "manager"), async (req: AppRequest, res) => {
-  const validation = await validateWorkspaceLicense(req.workspace!, false);
+  const license = req.workspace!.license;
   res.json({
-    license_id: req.workspace!.license_id,
-    company_uuid: req.workspace!.company_uuid,
-    workspace_slug: req.workspace!.slug,
-    last_validation: req.workspace!.last_license_validation,
-    valid: validation.valid,
-    maximum_users: validation.maximum_users,
+    license_id: license.license_id,
+    company_name: license.company_name,
+    edition: license.edition,
+    issued_at: license.issued_at,
+    valid: true,
+    maximum_users: license.max_users,
   });
 });

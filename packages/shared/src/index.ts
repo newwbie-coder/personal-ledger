@@ -1,7 +1,7 @@
 export type UserRole = "owner" | "manager" | "employee";
 export type LedgerEntryType = "incoming" | "outgoing";
 
-export const APP_VERSION = "1.4.0";
+export const APP_VERSION = "2.0.0";
 export const API_PREFIX = "/api/v1";
 
 export interface PublicWorkspace {
@@ -41,7 +41,8 @@ export interface DashboardStats {
 
 export interface HealthResponse {
   database: "OK" | "ERROR";
-  license: "OK" | "DEGRADED" | "ERROR";
+  setup_complete: boolean;
+  chain: "OK" | "BROKEN" | "UNCHECKED";
+  chain_checked_at: string | null;
   version: string;
-  workspaces: number;
 }

@@ -1,15 +1,40 @@
+# Office box: the app and its database run on this machine only.
+# Postgres has no published port; only the app container can reach it.
 services:
-  postgres:
+  db:
     image: postgres:16-alpine
-    ports:
-      - "5432:5432"
+    restart: unless-stopped
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: ledger_control
+      POSTGRES_USER: ledger
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ledger
     volumes:
-      - ledger_pg:/var/lib/postgresql/data
-      - ./docker/init-databases.sql:/docker-entrypoint-initdb.d/init-databases.sql:ro
+      - ledger_db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ledger -d ledger"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  app:
+    build: .
+    image: ledger-box:latest
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://ledger:${POSTGRES_PASSWORD}@db:5432/ledger
+      BOX_HOSTS: ${BOX_HOSTS:-10.8.0.1}
+      BACKUP_PASSPHRASE: ${BACKUP_PASSPHRASE:-}
+      BACKUP_KEEP: ${BACKUP_KEEP:-30}
+      NIGHTLY_HOUR: ${NIGHTLY_HOUR:-2}
+    volumes:
+      - ./data:/data
+      - ${BACKUP_HOST_DIR:-./backups}:/backups
+    ports:
+      - "${BIND_ADDRESS:-0.0.0.0}:443:8443"
+      - "${BIND_ADDRESS:-0.0.0.0}:80:8080"
 
 volumes:
-  ledger_pg:
+  ledger_db:

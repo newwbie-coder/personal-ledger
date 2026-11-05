@@ -6,7 +6,7 @@ import { z } from "zod";
 import { writeAudit } from "../audit.js";
 import { requireAuth, signToken, type AppRequest } from "../auth.js";
 import { queryWorkspace } from "../db.js";
-import { findWorkspaceBySlug } from "../workspaces.js";
+import { getLocalWorkspace } from "../workspaces.js";
 
 export const authRouter = Router();
 
@@ -45,7 +45,6 @@ function publicUser(row: {
 }
 
 const loginSchema = z.object({
-  workspace: z.string().min(1),
   username: z.string().min(1),
   password: z.string().min(1),
 });
@@ -53,13 +52,13 @@ const loginSchema = z.object({
 authRouter.post("/login", loginLimiter, async (req: AppRequest, res) => {
   const parsed = loginSchema.safeParse(req.body);
   if (!parsed.success) {
-    res.status(400).json({ error: "Workspace, username and password required" });
+    res.status(400).json({ error: "Username and password required" });
     return;
   }
 
-  const workspace = await findWorkspaceBySlug(parsed.data.workspace);
-  if (!workspace || workspace.status !== "active") {
-    res.status(401).json({ error: "Invalid credentials" });
+  const workspace = getLocalWorkspace();
+  if (!workspace) {
+    res.status(409).json({ error: "This box is not set up yet", code: "SETUP_REQUIRED" });
     return;
   }
 

@@ -15,4 +15,9 @@ coverage/
 .vercel
 .railway
 .env*
+!.env.example
 .license-production.txt
+backups/
+*.lbk
+*.license.json
+ledger-recovery-kit*.json

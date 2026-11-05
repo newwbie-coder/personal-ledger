@@ -7,7 +7,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { api, setToken, setWorkspaceSlug, getWorkspaceSlug } from "./lib/api";
+import { api, setToken } from "./lib/api";
 
 export type Role = "owner" | "manager" | "employee";
 
@@ -30,7 +30,7 @@ interface AuthState {
   user: User | null;
   workspace: WorkspaceInfo | null;
   loading: boolean;
-  login: (workspace: string, username: string, password: string) => Promise<void>;
+  login: (username: string, password: string) => Promise<void>;
   logout: () => void;
   refreshUser: () => Promise<void>;
   setUserPinFlag: (hasPin: boolean) => void;
@@ -53,7 +53,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           if (!cancelled) {
             setUser(me.user);
             setWorkspace(me.workspace);
-            setWorkspaceSlug(me.workspace.slug);
           }
         }
       } catch {
@@ -71,17 +70,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  const login = useCallback(async (ws: string, username: string, password: string) => {
+  const login = useCallback(async (username: string, password: string) => {
     const result = await api<{
       token: string;
       user: User;
       workspace: WorkspaceInfo;
     }>("/auth/login", {
       method: "POST",
-      body: JSON.stringify({ workspace: ws, username, password }),
+      body: JSON.stringify({ username, password }),
     });
     setToken(result.token);
-    setWorkspaceSlug(result.workspace.slug);
     setUser(result.user);
     setWorkspace(result.workspace);
     sessionStorage.setItem("ledger_pin_unlocked", "1");
@@ -117,5 +115,3 @@ export function useAuth() {
   if (!ctx) throw new Error("useAuth outside provider");
   return ctx;
 }
-
-export { getWorkspaceSlug };

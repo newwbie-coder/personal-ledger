@@ -1,6 +1,9 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 import { useAuth } from "./auth";
+import { ChainGuard } from "./components/ChainGuard";
 import { PinGate } from "./components/PinGate";
+import { BalancePage } from "./pages/BalancePage";
+import { useViewMode } from "./view-mode";
 import { AccountPage } from "./pages/AccountPage";
 import { HomePage } from "./pages/HomePage";
 import { LoginPage } from "./pages/LoginPage";
@@ -13,6 +16,7 @@ import { SetupPage } from "./pages/SetupPage";
 
 function Protected({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
+  const { balanceOnly } = useViewMode();
   if (loading) {
     return (
       <div className="app-shell">
@@ -21,7 +25,11 @@ function Protected({ children }: { children: React.ReactNode }) {
     );
   }
   if (!user) return <Navigate to="/login" replace />;
-  return <PinGate>{children}</PinGate>;
+  return (
+    <PinGate>
+      <ChainGuard>{balanceOnly ? <BalancePage /> : children}</ChainGuard>
+    </PinGate>
+  );
 }
 
 export function App() {

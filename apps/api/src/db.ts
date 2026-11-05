@@ -1,39 +1,30 @@
 import pg from "pg";
 import type { WorkspaceRecord } from "./workspaces.js";
-import { pgPoolOptions } from "./db-url.js";
-import { getWorkspaceDatabaseUrl } from "./workspaces.js";
 
 const { Pool } = pg;
 
-const pools = new Map<string, pg.Pool>();
+let pool: pg.Pool | null = null;
 
-export function getWorkspacePool(workspace: WorkspaceRecord): pg.Pool {
-  const existing = pools.get(workspace.workspace_id);
-  if (existing) return existing;
-
-  const connectionString = getWorkspaceDatabaseUrl(workspace);
-  const pool = new Pool(
-    pgPoolOptions(connectionString, undefined, { max: 10 }) as pg.PoolConfig,
-  );
-  pools.set(workspace.workspace_id, pool);
+/** The box's own Postgres. One company per box, so one pool. */
+export function getPool(): pg.Pool {
+  if (pool) return pool;
+  const connectionString = process.env.DATABASE_URL;
+  if (!connectionString) {
+    throw new Error("DATABASE_URL is required (the box's own Postgres).");
+  }
+  pool = new Pool({ connectionString, max: 10 });
   return pool;
 }
 
-/** Drop cached pool after DB URL swap so next query uses the new host. */
-export function resetWorkspacePool(workspaceId: string) {
-  const existing = pools.get(workspaceId);
-  if (existing) {
-    pools.delete(workspaceId);
-    void existing.end().catch(() => undefined);
-  }
+export function getWorkspacePool(_workspace?: WorkspaceRecord): pg.Pool {
+  return getPool();
 }
 
 export async function withWorkspaceClient<T>(
   workspace: WorkspaceRecord,
   fn: (client: pg.PoolClient) => Promise<T>,
 ): Promise<T> {
-  const pool = getWorkspacePool(workspace);
-  const client = await pool.connect();
+  const client = await getWorkspacePool(workspace).connect();
   try {
     return await fn(client);
   } finally {
@@ -58,17 +49,6 @@ export async function withTransaction<T>(
   });
 }
 
-export async function testDatabaseUrl(connectionString: string, host?: string): Promise<void> {
-  const pool = new Pool(
-    pgPoolOptions(connectionString, host, { connectionTimeoutMillis: 8000 }) as pg.PoolConfig,
-  );
-  try {
-    await pool.query("SELECT 1 AS ok");
-  } finally {
-    await pool.end();
-  }
-}
-
 export async function queryWorkspace<T extends pg.QueryResultRow = pg.QueryResultRow>(
   workspace: WorkspaceRecord,
   text: string,
@@ -77,8 +57,18 @@ export async function queryWorkspace<T extends pg.QueryResultRow = pg.QueryResul
   return getWorkspacePool(workspace).query<T>(text, params);
 }
 
-export async function closeAllPools() {
-  const pending = [...pools.values()].map((p) => p.end());
-  pools.clear();
-  await Promise.all(pending);
+export async function pingDatabase(): Promise<boolean> {
+  try {
+    await getPool().query("SELECT 1");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function closePool() {
+  if (!pool) return;
+  const p = pool;
+  pool = null;
+  await p.end();
 }

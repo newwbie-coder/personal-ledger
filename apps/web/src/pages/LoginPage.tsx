@@ -1,24 +1,35 @@
-import { FormEvent, useState } from "react";
-import { Link, Navigate } from "react-router-dom";
-import { useAuth, getWorkspaceSlug } from "../auth";
-import { ApiError } from "../lib/api";
+import { FormEvent, useEffect, useState } from "react";
+import { Navigate } from "react-router-dom";
+import { useAuth } from "../auth";
+import { api, ApiError } from "../lib/api";
 
 export function LoginPage() {
   const { login, user, loading } = useAuth();
-  const [workspace, setWorkspace] = useState(getWorkspaceSlug());
+  const [companyName, setCompanyName] = useState("");
+  const [setupComplete, setSetupComplete] = useState<boolean | null>(null);
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
+  useEffect(() => {
+    api<{ setup_complete: boolean; company_name: string | null }>("/setup/status")
+      .then((s) => {
+        setSetupComplete(s.setup_complete);
+        setCompanyName(s.company_name ?? "");
+      })
+      .catch(() => setSetupComplete(true));
+  }, []);
+
   if (!loading && user) return <Navigate to="/" replace />;
+  if (setupComplete === false) return <Navigate to="/setup" replace />;
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
     setBusy(true);
     setError("");
     try {
-      await login(workspace.trim(), username.trim(), password);
+      await login(username.trim(), password);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Login failed");
     } finally {
@@ -58,25 +69,11 @@ export function LoginPage() {
               <path d="M9.5 8.5h6M9.5 12h6M9.5 15.5h3.5" />
             </svg>
           </div>
-          <div className="eyebrow">Collaborative Ledger</div>
+          <div className="eyebrow">{companyName || "Collaborative Ledger"}</div>
           <h1 className="page-title" style={{ fontSize: 34 }}>Sign in</h1>
-          <p className="muted" style={{ margin: "8px 0 0" }}>
-            Enter your workspace and account.
-          </p>
         </div>
         <form className="card-surface" onSubmit={onSubmit}>
           {error ? <div className="error-banner">{error}</div> : null}
-          <div className="field">
-            <label htmlFor="workspace">Workspace</label>
-            <input
-              id="workspace"
-              autoComplete="organization"
-              value={workspace}
-              onChange={(e) => setWorkspace(e.target.value.toLowerCase())}
-              placeholder="your-company"
-              required
-            />
-          </div>
           <div className="field">
             <label htmlFor="username">Username</label>
             <input id="username" autoComplete="username" value={username} onChange={(e) => setUsername(e.target.value)} required />
@@ -89,9 +86,6 @@ export function LoginPage() {
             {busy ? "Signing in…" : "Sign in"}
           </button>
         </form>
-        <p className="muted" style={{ marginTop: 16, textAlign: "center", fontSize: 14 }}>
-          New business? <Link to="/setup">Create a workspace</Link>
-        </p>
       </div>
     </div>
   );

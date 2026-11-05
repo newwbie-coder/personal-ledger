@@ -305,4 +305,182 @@ CREATE INDEX IF NOT EXISTS idx_users_assigned_firm ON users (assigned_firm_id);
 UPDATE app_metadata SET schema_version = 6 WHERE id = 1;
 `,
   },
+  {
+    version: 7,
+    name: "fingerprint_chain",
+    sql: `
+CREATE TABLE IF NOT EXISTS chain_log (
+  seq BIGINT PRIMARY KEY,
+  record_table TEXT NOT NULL,
+  record_id UUID NOT NULL,
+  op TEXT NOT NULL CHECK (op IN ('backfill', 'insert', 'update', 'delete')),
+  record_digest TEXT NOT NULL,
+  prev_hash TEXT NOT NULL,
+  hash TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_chain_record ON chain_log (record_table, record_id, seq DESC);
+
+-- Fixed column list per table so later schema additions do not change old digests.
+CREATE OR REPLACE FUNCTION chain_row_digest(tbl TEXT, r JSONB) RETURNS TEXT
+LANGUAGE plpgsql STABLE AS $fn$
+DECLARE
+  cols TEXT[];
+  picked JSONB := '{}'::jsonb;
+  c TEXT;
+BEGIN
+  cols := CASE tbl
+    WHEN 'ledger_entries' THEN ARRAY['entry_id','firm_id','party_id','entry_kind','date_time','type','amount','description','created_by','reverse_of_entry','transfer_id','created_at']
+    WHEN 'transfers' THEN ARRAY['transfer_id','source_firm_id','destination_firm_id','amount','description','created_by','status','created_at']
+    WHEN 'opening_balances' THEN ARRAY['opening_balance_id','party_id','firm_id','balance','effective_date','created_by','created_at','locked']
+  END;
+  IF cols IS NULL THEN
+    RAISE EXCEPTION 'chain: unknown table %', tbl;
+  END IF;
+  FOREACH c IN ARRAY cols LOOP
+    picked := picked || jsonb_build_object(c, r -> c);
+  END LOOP;
+  RETURN encode(sha256(convert_to(picked::text, 'UTF8')), 'hex');
+END
+$fn$;
+
+CREATE OR REPLACE FUNCTION chain_append(tbl TEXT, rid UUID, op TEXT, d TEXT) RETURNS VOID
+LANGUAGE plpgsql AS $fn$
+DECLARE
+  last_seq BIGINT;
+  last_hash TEXT;
+  new_seq BIGINT;
+BEGIN
+  PERFORM pg_advisory_xact_lock(7413001);
+  SELECT seq, hash INTO last_seq, last_hash FROM chain_log ORDER BY seq DESC LIMIT 1;
+  IF last_seq IS NULL THEN
+    last_seq := 0;
+    last_hash := repeat('0', 64);
+  END IF;
+  new_seq := last_seq + 1;
+  INSERT INTO chain_log (seq, record_table, record_id, op, record_digest, prev_hash, hash)
+  VALUES (
+    new_seq, tbl, rid, op, d, last_hash,
+    encode(sha256(convert_to(
+      new_seq::text || '|' || last_hash || '|' || tbl || '|' || rid::text || '|' || op || '|' || d,
+      'UTF8')), 'hex')
+  );
+END
+$fn$;
+
+-- TimeZone is pinned so timestamps always serialize the same way.
+CREATE OR REPLACE FUNCTION chain_track() RETURNS TRIGGER
+LANGUAGE plpgsql SET TimeZone = 'UTC' AS $fn$
+DECLARE
+  pk TEXT := TG_ARGV[0];
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    PERFORM chain_append(TG_TABLE_NAME, (to_jsonb(OLD) ->> pk)::uuid, 'delete', 'deleted');
+    RETURN OLD;
+  END IF;
+  PERFORM chain_append(
+    TG_TABLE_NAME,
+    (to_jsonb(NEW) ->> pk)::uuid,
+    lower(TG_OP),
+    chain_row_digest(TG_TABLE_NAME, to_jsonb(NEW))
+  );
+  RETURN NEW;
+END
+$fn$;
+
+CREATE OR REPLACE FUNCTION chain_reject_change() RETURNS TRIGGER
+LANGUAGE plpgsql AS $fn$
+BEGIN
+  RAISE EXCEPTION '% rows cannot be changed or deleted', TG_TABLE_NAME;
+END
+$fn$;
+
+CREATE OR REPLACE FUNCTION chain_guard_transfer() RETURNS TRIGGER
+LANGUAGE plpgsql AS $fn$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    RAISE EXCEPTION 'transfers cannot be deleted';
+  END IF;
+  IF OLD.status <> 'posted' OR NEW.status <> 'reversed'
+     OR (to_jsonb(NEW) - 'status') IS DISTINCT FROM (to_jsonb(OLD) - 'status') THEN
+    RAISE EXCEPTION 'a transfer can only be marked reversed';
+  END IF;
+  RETURN NEW;
+END
+$fn$;
+
+CREATE OR REPLACE FUNCTION chain_guard_opening() RETURNS TRIGGER
+LANGUAGE plpgsql AS $fn$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    RAISE EXCEPTION 'opening balances cannot be deleted';
+  END IF;
+  IF OLD.locked THEN
+    RAISE EXCEPTION 'opening balance is locked';
+  END IF;
+  RETURN NEW;
+END
+$fn$;
+
+SET LOCAL TimeZone = 'UTC';
+DO $do$
+DECLARE
+  rec RECORD;
+BEGIN
+  FOR rec IN
+    SELECT * FROM (
+      SELECT 'opening_balances'::text AS tbl, o.opening_balance_id AS rid, to_jsonb(o) AS j, o.created_at
+      FROM opening_balances o
+      UNION ALL
+      SELECT 'transfers', t.transfer_id, to_jsonb(t), t.created_at FROM transfers t
+      UNION ALL
+      SELECT 'ledger_entries', e.entry_id, to_jsonb(e), e.created_at FROM ledger_entries e
+    ) rows_to_chain
+    ORDER BY created_at, rid
+  LOOP
+    PERFORM chain_append(rec.tbl, rec.rid, 'backfill', chain_row_digest(rec.tbl, rec.j));
+  END LOOP;
+END
+$do$;
+
+DROP TRIGGER IF EXISTS ledger_entries_immutable ON ledger_entries;
+CREATE TRIGGER ledger_entries_immutable
+  BEFORE UPDATE OR DELETE ON ledger_entries
+  FOR EACH ROW EXECUTE FUNCTION chain_reject_change();
+
+DROP TRIGGER IF EXISTS chain_log_immutable ON chain_log;
+CREATE TRIGGER chain_log_immutable
+  BEFORE UPDATE OR DELETE ON chain_log
+  FOR EACH ROW EXECUTE FUNCTION chain_reject_change();
+
+DROP TRIGGER IF EXISTS ledger_entries_chain ON ledger_entries;
+CREATE TRIGGER ledger_entries_chain
+  AFTER INSERT ON ledger_entries
+  FOR EACH ROW EXECUTE FUNCTION chain_track('entry_id');
+
+DROP TRIGGER IF EXISTS transfers_chain ON transfers;
+CREATE TRIGGER transfers_chain
+  AFTER INSERT OR UPDATE OR DELETE ON transfers
+  FOR EACH ROW EXECUTE FUNCTION chain_track('transfer_id');
+
+DROP TRIGGER IF EXISTS transfers_guard ON transfers;
+CREATE TRIGGER transfers_guard
+  BEFORE UPDATE OR DELETE ON transfers
+  FOR EACH ROW EXECUTE FUNCTION chain_guard_transfer();
+
+DROP TRIGGER IF EXISTS opening_balances_guard ON opening_balances;
+CREATE TRIGGER opening_balances_guard
+  BEFORE UPDATE OR DELETE ON opening_balances
+  FOR EACH ROW EXECUTE FUNCTION chain_guard_opening();
+
+DROP TRIGGER IF EXISTS opening_balances_chain ON opening_balances;
+CREATE TRIGGER opening_balances_chain
+  AFTER INSERT OR UPDATE OR DELETE ON opening_balances
+  FOR EACH ROW EXECUTE FUNCTION chain_track('opening_balance_id');
+
+ALTER TABLE app_metadata ADD COLUMN IF NOT EXISTS license JSONB;
+
+UPDATE app_metadata SET schema_version = 7 WHERE id = 1;
+`,
+  },
 ];

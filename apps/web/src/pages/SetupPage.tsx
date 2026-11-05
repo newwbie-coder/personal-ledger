@@ -1,91 +1,90 @@
-import { FormEvent, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
-import { api, ApiError, setWorkspaceSlug } from "../lib/api";
+import { type ChangeEvent, type FormEvent, useEffect, useState } from "react";
+import { Link, Navigate, useNavigate } from "react-router-dom";
+import { api, ApiError, downloadJson } from "../lib/api";
 
-type Step = 1 | 2 | 3 | 4 | 5 | 6;
-type Provider = "supabase" | "existing" | "self_hosted";
+type Step = 1 | 2 | 3 | 4;
 
-const PROVIDER_LABEL: Record<Provider, string> = {
-  supabase: "Supabase (Recommended)",
-  existing: "Existing PostgreSQL",
-  self_hosted: "Self-hosted PostgreSQL",
+interface LicenseInfo {
+  license_id: string;
+  company_name: string;
+  max_users: number;
+  edition: string;
+}
+
+const STEP_TITLE: Record<Step, string> = {
+  1: "License",
+  2: "Owner account",
+  3: "Recovery passphrase",
+  4: "Save your recovery kit",
 };
 
 export function SetupPage() {
   const navigate = useNavigate();
+  const [alreadySetUp, setAlreadySetUp] = useState(false);
   const [step, setStep] = useState<Step>(1);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  const [connectionOk, setConnectionOk] = useState(false);
-  const [provider, setProvider] = useState<Provider>("supabase");
-  const [form, setForm] = useState({
-    company_name: "",
-    workspace_slug: "",
-    license_id: "LIC-DEMO-0001",
-    host: "",
-    port: "5432",
-    database: "postgres",
-    username: "postgres",
-    password: "",
-    owner_name: "",
-    owner_username: "",
-    owner_password: "",
-  });
+  const [licenseFile, setLicenseFile] = useState<unknown>(null);
+  const [license, setLicense] = useState<LicenseInfo | null>(null);
+  const [owner, setOwner] = useState({ name: "", username: "", password: "" });
+  const [passphrase, setPassphrase] = useState("");
+  const [passphraseConfirm, setPassphraseConfirm] = useState("");
+  const [recoveryKit, setRecoveryKit] = useState<unknown>(null);
+  const [kitSaved, setKitSaved] = useState(false);
 
-  function update<K extends keyof typeof form>(key: K, value: string) {
-    setForm((f) => ({ ...f, [key]: value }));
-    if (["host", "port", "database", "username", "password"].includes(key)) {
-      setConnectionOk(false);
-    }
-  }
+  useEffect(() => {
+    api<{ setup_complete: boolean }>("/setup/status")
+      .then((s) => setAlreadySetUp(s.setup_complete && step !== 4))
+      .catch(() => undefined);
+  }, [step]);
 
-  function connectionPayload() {
-    return {
-      host: form.host.trim(),
-      port: Number(form.port) || 5432,
-      database: form.database.trim(),
-      username: form.username.trim(),
-      password: form.password,
-      db_provider: provider,
-    };
-  }
+  if (alreadySetUp) return <Navigate to="/login" replace />;
 
-  async function testConnection() {
-    setBusy(true);
+  async function onLicenseFile(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
     setError("");
+    setLicense(null);
+    if (!file) return;
     try {
-      await api("/setup/test-connection", {
+      const parsed = JSON.parse(await file.text()) as unknown;
+      const result = await api<{ license: LicenseInfo }>("/setup/license/check", {
         method: "POST",
-        body: JSON.stringify(connectionPayload()),
+        body: JSON.stringify({ license: parsed }),
       });
-      setConnectionOk(true);
+      setLicenseFile(parsed);
+      setLicense(result.license);
     } catch (err) {
-      setConnectionOk(false);
-      setError(err instanceof ApiError ? err.message : "Connection failed");
-    } finally {
-      setBusy(false);
+      if (err instanceof ApiError) setError(err.message);
+      else if (err instanceof SyntaxError) setError("That file is not a valid license");
+      else {
+        setError(
+          "The browser blocked the connection because it does not trust this box yet. Install ca.crt as a trusted root, restart the browser, then choose the file again.",
+        );
+      }
     }
   }
 
   async function finish(e: FormEvent) {
     e.preventDefault();
+    if (passphrase !== passphraseConfirm) {
+      setError("Passphrases do not match");
+      return;
+    }
     setBusy(true);
     setError("");
     try {
-      const result = await api<{ workspace: { slug: string } }>("/setup/initialize", {
+      const result = await api<{ recovery_kit: unknown }>("/setup/initialize", {
         method: "POST",
         body: JSON.stringify({
-          company_name: form.company_name,
-          workspace_slug: form.workspace_slug,
-          license_id: form.license_id,
-          owner_name: form.owner_name,
-          owner_username: form.owner_username,
-          owner_password: form.owner_password,
-          ...connectionPayload(),
+          license: licenseFile,
+          owner_name: owner.name,
+          owner_username: owner.username,
+          owner_password: owner.password,
+          recovery_passphrase: passphrase,
         }),
       });
-      setWorkspaceSlug(result.workspace.slug);
-      setStep(6);
+      setRecoveryKit(result.recovery_kit);
+      setStep(4);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Setup failed");
     } finally {
@@ -93,28 +92,19 @@ export function SetupPage() {
     }
   }
 
-  const progressStep = step >= 6 ? 5 : step <= 4 ? Math.min(step, 4) : 4;
-
   return (
     <div className="app-shell">
       <div className="page">
         <div className="page-head" style={{ marginBottom: 16 }}>
-          <div className="eyebrow">Create workspace</div>
-          <h1 className="page-title">
-            {step === 1 && "Company"}
-            {step === 2 && "License"}
-            {step === 3 && "Where should data live?"}
-            {step === 4 && "Connect database"}
-            {step === 5 && "Owner account"}
-            {step === 6 && "Done"}
-          </h1>
+          <div className="eyebrow">Set up this office box</div>
+          <h1 className="page-title">{STEP_TITLE[step]}</h1>
           <p className="muted" style={{ margin: "8px 0 0", fontSize: 14 }}>
-            {step < 6 ? `Step ${progressStep} of 5 · Credentials stay on the server` : "Workspace ready"}
+            Step {step} of 4 · Everything stays on this box
           </p>
         </div>
 
         <div style={{ display: "flex", gap: 6, marginBottom: 18 }}>
-          {[1, 2, 3, 4, 5].map((n) => (
+          {[1, 2, 3, 4].map((n) => (
             <div
               key={n}
               style={{
@@ -122,9 +112,8 @@ export function SetupPage() {
                 height: 4,
                 borderRadius: 4,
                 transition: "background 0.3s var(--ease)",
-                background: progressStep >= n
-                  ? "linear-gradient(90deg, var(--brand), var(--brand-2))"
-                  : "var(--line)",
+                background:
+                  step >= n ? "linear-gradient(90deg, var(--brand), var(--brand-2))" : "var(--line)",
               }}
             />
           ))}
@@ -135,23 +124,21 @@ export function SetupPage() {
         {step === 1 ? (
           <div className="card-surface">
             <div className="field">
-              <label>Company name</label>
-              <input value={form.company_name} onChange={(e) => update("company_name", e.target.value)} required />
+              <label>License file</label>
+              <input type="file" accept=".json,application/json" onChange={(e) => void onLicenseFile(e)} />
+              <span className="field-hint">
+                The .license.json file you received. It is checked on this box; nothing is sent anywhere.
+              </span>
             </div>
-            <div className="field">
-              <label>Workspace slug</label>
-              <input
-                value={form.workspace_slug}
-                onChange={(e) => update("workspace_slug", e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ""))}
-                placeholder="acme-traders"
-                required
-              />
-              <span className="field-hint">Used at login. Lowercase letters, numbers, hyphens.</span>
-            </div>
+            {license ? (
+              <div className="success-banner">
+                {license.company_name} · up to {license.max_users} users · {license.license_id}
+              </div>
+            ) : null}
             <button
               className="btn btn-primary btn-block"
               type="button"
-              disabled={!form.company_name || form.workspace_slug.length < 2}
+              disabled={!license}
               onClick={() => {
                 setError("");
                 setStep(2);
@@ -165,16 +152,40 @@ export function SetupPage() {
         {step === 2 ? (
           <div className="card-surface">
             <div className="field">
-              <label>License key</label>
-              <input value={form.license_id} onChange={(e) => update("license_id", e.target.value)} required />
+              <label>Owner name</label>
+              <input value={owner.name} onChange={(e) => setOwner({ ...owner, name: e.target.value })} required />
+            </div>
+            <div className="field">
+              <label>Owner username</label>
+              <input
+                value={owner.username}
+                onChange={(e) => setOwner({ ...owner, username: e.target.value })}
+                autoComplete="username"
+                minLength={3}
+                required
+              />
+            </div>
+            <div className="field">
+              <label>Owner password</label>
+              <input
+                type="password"
+                value={owner.password}
+                onChange={(e) => setOwner({ ...owner, password: e.target.value })}
+                autoComplete="new-password"
+                minLength={8}
+                required
+              />
+              <span className="field-hint">At least 8 characters.</span>
             </div>
             <div style={{ display: "flex", gap: 8 }}>
-              <button className="btn btn-secondary" type="button" onClick={() => setStep(1)}>Back</button>
+              <button className="btn btn-secondary" type="button" onClick={() => setStep(1)}>
+                Back
+              </button>
               <button
                 className="btn btn-primary"
                 style={{ flex: 1 }}
                 type="button"
-                disabled={!form.license_id}
+                disabled={!owner.name || owner.username.length < 3 || owner.password.length < 8}
                 onClick={() => {
                   setError("");
                   setStep(3);
@@ -187,201 +198,81 @@ export function SetupPage() {
         ) : null}
 
         {step === 3 ? (
-          <div className="card-surface">
-            <p className="muted" style={{ marginTop: 0 }}>
-              You own this database. We only store an encrypted connection so the API can reach it.
+          <form className="card-surface" onSubmit={finish}>
+            <p className="muted" style={{ marginTop: 0, fontSize: 14, lineHeight: 1.55 }}>
+              Your books are encrypted with a key that only this box holds. The recovery passphrase
+              protects a copy of that key, so you can rebuild on a new machine if this one dies.
+              <strong> Nobody, including the app maker, can recover it for you.</strong> Write it down
+              and keep it away from the office.
             </p>
-            {(Object.keys(PROVIDER_LABEL) as Provider[]).map((key) => (
-              <label
-                key={key}
-                style={{
-                  display: "flex",
-                  gap: 12,
-                  alignItems: "flex-start",
-                  padding: "12px 0",
-                  borderBottom: "1px solid var(--line)",
-                  cursor: "pointer",
-                }}
-              >
-                <input
-                  type="radio"
-                  name="provider"
-                  checked={provider === key}
-                  onChange={() => {
-                    setProvider(key);
-                    setConnectionOk(false);
-                    if (key === "supabase") {
-                      setForm((f) => ({
-                        ...f,
-                        port: "5432",
-                        database: "postgres",
-                        username: "postgres",
-                        host: f.host.includes("supabase") ? f.host : "",
-                      }));
-                    }
-                  }}
-                  style={{ marginTop: 4 }}
-                />
-                <span>
-                  <strong>{PROVIDER_LABEL[key]}</strong>
-                  {key === "supabase" ? (
-                    <div className="muted" style={{ fontSize: 13, marginTop: 2 }}>
-                      Free tier works. Guided setup on the next screen.
-                    </div>
-                  ) : null}
-                  {key === "existing" ? (
-                    <div className="muted" style={{ fontSize: 13, marginTop: 2 }}>
-                      Neon, RDS, Railway, or any hosted Postgres.
-                    </div>
-                  ) : null}
-                  {key === "self_hosted" ? (
-                    <div className="muted" style={{ fontSize: 13, marginTop: 2 }}>
-                      Your own server or local Postgres.
-                    </div>
-                  ) : null}
-                </span>
-              </label>
-            ))}
-            <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
-              <button className="btn btn-secondary" type="button" onClick={() => setStep(2)}>Back</button>
-              <button className="btn btn-primary" style={{ flex: 1 }} type="button" onClick={() => { setError(""); setStep(4); }}>
-                Continue
-              </button>
-            </div>
-          </div>
-        ) : null}
-
-        {step === 4 ? (
-          <div className="card-surface">
-            {provider === "supabase" ? (
-              <>
-                <ol className="muted" style={{ marginTop: 0, paddingLeft: 18, fontSize: 14, lineHeight: 1.55 }}>
-                  <li>Open <a href="https://supabase.com" target="_blank" rel="noreferrer">supabase.com</a> and create a project (wait until it is fully ready)</li>
-                  <li>Go to <strong>Project Settings → Database → Connect</strong></li>
-                  <li>
-                    Choose <strong>Session pooler</strong> (not Direct connection — Direct is IPv6-only and often fails on Windows)
-                  </li>
-                  <li>Copy Host, Port, Database, User, Password from the pooler connection parameters</li>
-                  <li>
-                    Pooler username is usually <code>postgres.your-project-ref</code>, not plain <code>postgres</code>
-                  </li>
-                  <li>Paste each field below (not the full URL)</li>
-                </ol>
-                <p className="field-hint" style={{ marginBottom: 14 }}>
-                  If you see <strong>ENOTFOUND</strong> or connection errors with <code>db….supabase.co</code>, switch to Session pooler — host looks like <code>aws-0-….pooler.supabase.com</code>, port <strong>5432</strong>.
-                </p>
-              </>
-            ) : (
-              <p className="muted" style={{ marginTop: 0, fontSize: 14 }}>
-                Enter your PostgreSQL connection details. We build the secure connection on the server —
-                you never need to paste a URI.
-              </p>
-            )}
-
             <div className="field">
-              <label>Host</label>
-              <input
-                value={form.host}
-                onChange={(e) => update("host", e.target.value)}
-                placeholder={provider === "supabase" ? "aws-0-….pooler.supabase.com" : "db.example.com"}
-                required
-                autoComplete="off"
-              />
-            </div>
-            <div className="field">
-              <label>Port</label>
-              <input
-                value={form.port}
-                onChange={(e) => update("port", e.target.value)}
-                inputMode="numeric"
-                required
-              />
-            </div>
-            <div className="field">
-              <label>Database</label>
-              <input value={form.database} onChange={(e) => update("database", e.target.value)} required />
-            </div>
-            <div className="field">
-              <label>Username</label>
-              <input value={form.username} onChange={(e) => update("username", e.target.value)} required autoComplete="off" />
-            </div>
-            <div className="field">
-              <label>Password</label>
+              <label>Recovery passphrase</label>
               <input
                 type="password"
-                value={form.password}
-                onChange={(e) => update("password", e.target.value)}
-                required
+                value={passphrase}
+                onChange={(e) => setPassphrase(e.target.value)}
                 autoComplete="new-password"
+                minLength={10}
+                required
+              />
+              <span className="field-hint">At least 10 characters. A short sentence works well.</span>
+            </div>
+            <div className="field">
+              <label>Confirm passphrase</label>
+              <input
+                type="password"
+                value={passphraseConfirm}
+                onChange={(e) => setPassphraseConfirm(e.target.value)}
+                autoComplete="new-password"
+                required
               />
             </div>
-
-            {connectionOk ? <div className="success-banner">Connection OK</div> : null}
-            <button
-              className="btn btn-secondary btn-block"
-              type="button"
-              disabled={busy || !form.host || !form.password}
-              onClick={() => void testConnection()}
-            >
-              {busy ? "Testing…" : "Test connection"}
-            </button>
-            <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-              <button className="btn btn-secondary" type="button" onClick={() => setStep(3)}>Back</button>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button className="btn btn-secondary" type="button" onClick={() => setStep(2)}>
+                Back
+              </button>
               <button
                 className="btn btn-primary"
                 style={{ flex: 1 }}
-                type="button"
-                disabled={!connectionOk}
-                onClick={() => {
-                  setError("");
-                  setStep(5);
-                }}
+                disabled={busy || passphrase.length < 10}
+                type="submit"
               >
-                Continue
-              </button>
-            </div>
-          </div>
-        ) : null}
-
-        {step === 5 ? (
-          <form className="card-surface" onSubmit={finish}>
-            <div className="field">
-              <label>Owner name</label>
-              <input value={form.owner_name} onChange={(e) => update("owner_name", e.target.value)} required />
-            </div>
-            <div className="field">
-              <label>Owner username</label>
-              <input value={form.owner_username} onChange={(e) => update("owner_username", e.target.value)} required minLength={3} />
-            </div>
-            <div className="field">
-              <label>Owner password</label>
-              <input type="password" value={form.owner_password} onChange={(e) => update("owner_password", e.target.value)} required minLength={6} />
-            </div>
-            <div style={{ display: "flex", gap: 8 }}>
-              <button className="btn btn-secondary" type="button" onClick={() => setStep(4)}>Back</button>
-              <button className="btn btn-primary" style={{ flex: 1 }} disabled={busy} type="submit">
-                {busy ? "Initializing…" : "Initialize workspace"}
+                {busy ? "Setting up…" : "Finish setup"}
               </button>
             </div>
           </form>
         ) : null}
 
-        {step === 6 ? (
+        {step === 4 ? (
           <div className="card-surface">
-            <div className="success-banner">Workspace ready</div>
-            <p style={{ marginTop: 0 }}>
-              Sign in with workspace <strong>{form.workspace_slug}</strong> and your owner account.
+            <div className="success-banner">{license?.company_name} is set up</div>
+            <p style={{ marginTop: 0, fontSize: 14, lineHeight: 1.55 }}>
+              Download the recovery kit and store it off this box (a USB drive at home, or printed).
+              Restoring needs the kit and your recovery passphrase.
             </p>
-            <p className="muted" style={{ fontSize: 13 }}>
-              Storage: {PROVIDER_LABEL[provider]}
-            </p>
-            <button className="btn btn-primary btn-block" type="button" onClick={() => navigate("/login", { replace: true })}>
+            <button
+              className="btn btn-secondary btn-block"
+              type="button"
+              onClick={() => {
+                downloadJson(recoveryKit, "ledger-recovery-kit.json");
+                setKitSaved(true);
+              }}
+            >
+              Download recovery kit
+            </button>
+            <button
+              className="btn btn-primary btn-block"
+              style={{ marginTop: 8 }}
+              type="button"
+              disabled={!kitSaved}
+              onClick={() => navigate("/login", { replace: true })}
+            >
               Go to sign in
             </button>
           </div>
         ) : null}
 
-        {step < 6 ? (
+        {step < 4 ? (
           <p className="muted" style={{ marginTop: 16, textAlign: "center", fontSize: 14 }}>
             Already set up? <Link to="/login">Sign in</Link>
           </p>

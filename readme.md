@@ -1,5 +1,5 @@
 # PROJECT SPECIFICATION
-Version: 1.3
+Version: 2.0
 Status: Locked
 
 ---
@@ -8,54 +8,35 @@ Status: Locked
 
 Collaborative Ledger (PWA)
 
-A collaborative cloud ledger for small businesses.
+A shared party ledger for small businesses that runs on a computer in the business's own office.
 
 Not an ERP. Not accounting software.
 
-Purpose: multiple users securely maintain a shared party ledger from anywhere, while each business owns its own data workspace.
+Purpose: several staff keep one party ledger from their phones, anywhere, while the books never leave the owner's premises and the app maker has no way in.
 
 ---
 
 # Locked Architecture Decision
 
-**One Express API deployment serves many customer-owned Workspaces.**
+**One box per company, in the company's office. No cloud provider, no vendor server.**
 
 ```
-Phone PWA (JWT only)
-        ↓
-   Express API  (/api/v1)
-        ↓
- Control Database (yours — metadata only)
-   read encrypted DB URL for workspace
-        ↓
- Decrypt → connect with pg driver
-        ↓
- Customer PostgreSQL (their data only)
+Staff phone (PWA)
+   │  WireGuard tunnel (encrypted, only enrolled phones)
+   ▼
+Office router ── forwards UDP 51820 only
+   ▼
+Office box (Linux or Windows PC)
+   ├─ app container: HTTPS API + web app, keys in ./data
+   └─ Postgres container: no published port
 ```
 
-### Control Database (platform-owned)
+- The box holds the database, the data key, the HTTPS certificate authority and the JWT secret. All are created on the box at first start.
+- The app maker issues a signed license file once. The box checks it offline with an embedded public key. There is no phone-home, no expiry, no kill switch.
+- Phones reach the box only through WireGuard. Nothing else is exposed to the internet.
 
-Tiny Postgres you operate. Contains **only** routing metadata:
+See [OFFICE_SETUP.md](OFFICE_SETUP.md) for installing a box.
 
-- workspace_id, slug, company_name, company_uuid
-- encrypted_database_url
-- license_id, activation_token, status
-- created_at, last_license_validation
-
-**Never stores:** parties, ledger entries, balances, or any financial data.
-
-Env: `CONTROL_DATABASE_URL`
-
-### Customer Workspace Database
-
-Owned by the customer (Supabase / Neon / RDS / self-hosted). Holds all business data.
-
-- Browser never sees Host/Password/URI after setup.
-- Setup collects discrete fields (Host, Port, Database, Username, Password); API builds the URI.
-- No Supabase Auth — Postgres is storage only; auth is bcrypt + JWT.
-- Externally: **Workspace**. Counterparties: **Party**.
-
-Alternative rejected for v1: one full app deployment per customer.
 ---
 
 # Core Philosophy
@@ -71,52 +52,41 @@ Feels as easy as a paper ledger.
 # Product Principles
 
 - One-time purchase.
-- Customer owns their Workspace database.
-- Developer never stores business ledger data in the platform DB.
-- Multi-user, cloud accessible, phone-first PWA.
-- Immutable accounting.
-- One API, many Workspaces.
+- The customer owns the hardware, the data and every key.
+- The app maker cannot read, change, lock or switch off a customer's books.
+- Multi-user, reachable from anywhere over the office VPN, phone-first PWA.
+- Immutable accounting, provable with a fingerprint chain.
 
 ---
 
 # Technology Stack
 
 Client
-- React, TypeScript, TailwindCSS, Vite, PWA
+- React, TypeScript, Vite, PWA
 
 API
-- Node.js, Express, TypeScript
-- Mounted under `/api/v1`
+- Node.js, Express, TypeScript, mounted under `/api/v1`
+- Serves the built web app on the same HTTPS origin
 
-License
-- Separate Express service (license metadata only)
+Database
+- PostgreSQL 16 on the box (docker compose)
 
-Database (per Workspace)
-- PostgreSQL only (Supabase / Neon / self-hosted as hosts)
-- No Supabase-specific APIs in app logic
-
-Platform registry
-- **Control Database** (`CONTROL_DATABASE_URL`) — workspace metadata + encrypted DB URL only
-- Not used for ledger rows
+Network
+- WireGuard for remote access; HTTPS with the office's own certificate authority
 
 Monorepo
-- `apps/web`, `apps/api`, `apps/license`
-- `packages/db`, `packages/shared`
+- `apps/web`, `apps/api`
+- `packages/db` (migrations), `packages/shared`
+- `scripts/license` (vendor-only signing tools), `scripts/wireguard` (box VPN tools)
 
 ---
 
 # Domain Model
 
-## Workspace (external)
+## Company (one per box)
 
-- workspace_id
-- slug (used at login)
-- company_name
-- company_uuid
-- license binding
-- encrypted_database_url (Control DB only — never returned to client)
-- status
-- db_provider (supabase | existing | self_hosted)
+- company_name, company_uuid
+- license (signed file: license_id, max_users, edition)
 
 ## Firm
 
@@ -127,7 +97,7 @@ Monorepo
 
 Every mutation belongs to exactly one firm. **Workspace Summary** is read-only aggregate view.
 
-## Party (workspace-global)
+## Party (company-wide)
 
 - party_id, party_name, phone, active
 - Opening ledger: `opening_balances` (party + firm required) with balance, effective_date, locked
@@ -141,16 +111,6 @@ Every mutation belongs to exactly one firm. **Workspace Summary** is read-only a
 - Two linked `ledger_entries` with `entry_kind = transfer`, `party_id NULL` (CHECK-enforced)
 - Same-firm transfers rejected
 - Reversal reverses both sides atomically
-- encrypted database_url (API-only)
-
-## Party (replaces “Customer”)
-
-- party_id
-- party_name
-- phone (optional)
-- opening_balance
-- active (soft delete only)
-- created_at (server)
 
 ## Ledger Entry
 
@@ -182,6 +142,11 @@ Owner can reset employee passwords. Employees cannot reset anyone’s.
 - device
 - created_at (server)
 
+## Chain Log (fingerprint chain)
+
+- seq, table_name, record_id, op, record_digest, prev_hash, hash, created_at
+- One link per insert or change to ledger entries, transfers and opening balances
+
 ---
 
 # Accounting Rules
@@ -191,58 +156,63 @@ Owner can reset employee passwords. Employees cannot reset anyone’s.
 - Balances computed only on the server (opening + signed entry sum).
 - Ledger writes use SQL transactions.
 - Never trust client timestamps for `created_at` / entry time.
+- The database itself enforces this: ledger entries and the chain log reject UPDATE and DELETE, a transfer may only change from posted to reversed, and a locked opening balance cannot change.
 
 ---
 
 # Security
 
-- Browser: JWT only.
-- Passwords: bcrypt.
-- Login rate-limited.
-- Soft-delete parties (`active = false`) — never hard delete.
-- Request logging on every API call.
-- License revalidate ~30 days; seats via `maximum_users`.
+Network
+- The box is not reachable from the internet except through WireGuard (UDP 51820). Postgres has no published port.
+- Each phone has its own WireGuard key and a preshared key, and can reach only the box address `10.8.0.1`, not the office LAN.
+- A lost phone is cut off with one command (`remove-phone`), and its ledger account can be disabled in Settings.
+
+Transport
+- HTTPS on the box, using a certificate authority created on that box. Phones install `ca.crt` once from the box's install page.
+- Strict-Transport-Security, no-sniff and frame-deny headers. CORS is off in production (same origin).
+
+Data at rest
+- Party names, phones, amounts and descriptions are sealed with AES-256-GCM using a data key generated on the box.
+- The data key is copied into a recovery kit encrypted with the owner's recovery passphrase (scrypt + AES-256-GCM). Nobody else can open it.
+- Nightly backups are encrypted with the backup passphrase and include the recovery kit, so a backup plus both passphrases rebuilds the company on new hardware.
+
+Integrity
+- Every ledger change is linked into a SHA-256 hash chain by database triggers in the same transaction.
+- `Verify ledger` (Settings) and the nightly check recompute every link and every record fingerprint.
+- Each phone stores the last chain point it saw and re-checks it every few minutes. If history is rolled back or rewritten, the phone shows a red "Ledger history changed" banner, even if someone recomputed all hashes on the box.
+
+Accounts
+- Passwords: bcrypt. Login rate-limited. JWT secret generated on the box.
+- Every request re-reads the user's role and active flag, so disabling an account takes effect immediately.
+- Request logging and an audit log for every mutation.
+
+Honest limits
+- Whoever controls the box's operating system (for example, an IT person with admin rights) can read data and can disable triggers. They cannot hide an edit from the chain check or from phones that already saw the record.
+- If the box is stolen while running, the data key is on its disk. Use full-disk encryption (BitLocker or LUKS) and a locked room.
+- If both the box and every backup are lost, or the recovery passphrase is forgotten, the books are gone. No one, including the app maker, can recover them.
 
 ---
 
-# Setup Wizard (professional flow)
+# Setup Wizard
 
-1. Company name + Workspace slug  
-2. License key  
-3. Where do you want to store your data?  
-   - Supabase (Recommended) — with click-by-click guide  
-   - Existing PostgreSQL  
-   - Self-hosted PostgreSQL  
-4. Connect database — **discrete fields only**  
-   - Host · Port · Database · Username · Password  
-   - Test connection  
-   - API builds `postgresql://…` server-side  
-5. Create owner  
-6. Done  
-
-Never ask non-technical users to paste a raw connection URI in the product UI.
-
-Credentials are POSTed once to the API over HTTPS, encrypted into the Control Database, and never returned to the client.
+1. Upload the license file (checked on the box, nothing sent anywhere).
+2. Create the owner account.
+3. Choose a recovery passphrase (entered twice).
+4. Download the recovery kit and store it off the box.
 
 ---
 
-# Where credentials live
+# Where secrets live
 
-**Login credentials are not stored on the Control DB as plain passwords.** There are three different credential types:
-
-| What | Where it lives | Who owns it |
-|------|----------------|-------------|
-| **Login** (workspace slug + username + password) | Hashed `password_hash` in the **customer workspace** `users` table | Customer’s Postgres (often Supabase as host) |
-| **JWT** after login | Browser `localStorage` only | Session token signed by your API (`JWT_SECRET`) |
-| **DB connection** (Host/Port/DB/User/Pass) | Encrypted once in **your Control DB** as `encrypted_database_url` | Platform holds the encrypted URI so the API can connect; browser never sees it again |
-| **License** | Separate license service (`licenses` table on Control Postgres) | Platform |
-| **Workspace DEK** | Wrapped on Control DB (`wrapped_data_key`); unlocked only with valid license bind + `DATA_KEY_SECRET` | Platform |
-
-**No Supabase Auth.** Supabase is Postgres hosting only. Auth is bcrypt + JWT in the Express API.
-
-Customer creates a Supabase project → pastes **database** credentials once at workspace setup → their **app login** is created in *that* database’s `users` table. Business fields (party names, amounts, notes) are stored as **ciphertext**; without a valid license activation through the API, dumps are not useful.
-
-See [MOVE_DATABASE.md](MOVE_DATABASE.md) to move a workspace to another Postgres host without re-buying a license.
+| What | Where | Who can use it |
+|------|-------|----------------|
+| Staff passwords | bcrypt hashes in the box's `users` table | Nobody can reverse them |
+| Session tokens | Phone `localStorage`, signed with `data/keys/jwt.secret` | The box |
+| Data key | `data/keys/workspace.key` on the box | The box |
+| Recovery kit | `data/keys/recovery-kit.json` plus the owner's downloaded copy | Only with the recovery passphrase |
+| HTTPS CA key | `data/tls/ca.key` on the box | The box |
+| WireGuard keys | `/etc/wireguard` or `C:\ProgramData\LedgerBox\wireguard` on the box; each phone holds its own | Box and that phone |
+| License signing key | The app maker's PC only (`~/.ledger-vendor`) | App maker, to issue new license files |
 
 ---
 
@@ -250,8 +220,12 @@ See [MOVE_DATABASE.md](MOVE_DATABASE.md) to move a workspace to another Postgres
 
 Base: `/api/v1`
 
-- `GET /health` → `{ database, license, version, workspaces }`
-- Auth, parties, ledger, dashboard, reports, users, setup
+- `GET /health` → `{ database, setup_complete, chain, chain_checked_at, version }`
+- `setup`, `auth`, `users`, `firms`, `parties`, `openings`, `ledger`, `transfers`, `dashboard`, `reports`, `notifications`
+- `chain`: `GET /head`, `GET /check?seq&hash`, `GET /report`, `POST /verify`
+- `box`: `GET /recovery-kit`
+
+Box commands (inside the app container): `node apps/api/dist/box-cli.js migrate | backup | restore <file> | verify-chain | qr`
 
 ---
 
@@ -261,11 +235,13 @@ Bottom nav: Home · Parties · Reports · Settings
 
 Dashboard: today’s in/out, outstanding, today’s count. No charts.
 
+Balance-only mode: one screen with the available balance and an "Open app" button, switchable from Settings or Account.
+
 ---
 
 # Out Of Scope
 
-Inventory, invoices, GST, CRM, ERP, AI, charts, Electron, Capacitor/app stores, mixing ledger data across workspaces.
+Inventory, invoices, GST, CRM, ERP, AI, charts, Electron, Capacitor/app stores, cloud hosting.
 
 ---
 
@@ -278,11 +254,8 @@ Inventory, invoices, GST, CRM, ERP, AI, charts, Electron, Capacitor/app stores, 
 
 # Local Development
 
-1. Copy `.env.example` → `.env` (set `CONTROL_DATABASE_URL`, `ENCRYPTION_KEY`, JWT secrets).
-2. Start Postgres: `docker compose up -d` (creates `ledger_control` + `ledger_workspace`).
-3. `npm install`
-4. `dev.bat` or `npm run dev:license` / `dev:api` / `dev:web`
-5. Open http://localhost:5173 → create a Workspace via setup.
-6. Demo license: `LIC-DEMO-0001`
-
-For local workspace DB during setup use e.g. host `localhost`, port `5432`, database `ledger_workspace`, user/password `postgres`.
+1. `npm install`
+2. Copy `.env.example` → `.env` and uncomment the development block (`DATABASE_URL`, `CORS_ORIGIN`, `VITE_API_URL`).
+3. `dev.bat` (embedded Postgres on 54329, API on 4000, web on 5173), or run `npm run demo:pg -w @ledger/api`, `npm run dev:api`, `npm run dev:web` separately.
+4. Issue a test license: `npm run license:issue -- --company "Test Co" --users 5 --out test.license.json` (run `npm run license:keygen` once first).
+5. Open http://localhost:5173 and upload the license in setup.

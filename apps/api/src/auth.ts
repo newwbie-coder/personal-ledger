@@ -1,10 +1,12 @@
 import type { UserRole } from "@ledger/db";
 import type { NextFunction, Request, Response } from "express";
 import jwt from "jsonwebtoken";
+import { getJwtSecret } from "./box.js";
+import { queryWorkspace } from "./db.js";
 import type { WorkspaceRecord } from "./workspaces.js";
 import { findWorkspaceById } from "./workspaces.js";
 
-const JWT_SECRET = () => process.env.JWT_SECRET ?? "change-me-to-a-long-random-string";
+const JWT_SECRET = getJwtSecret;
 
 export interface AuthUser {
   user_id: string;
@@ -36,19 +38,42 @@ export async function requireAuth(req: AppRequest, res: Response, next: NextFunc
     res.status(401).json({ error: "Authentication required" });
     return;
   }
+  let payload: AuthUser;
   try {
-    const payload = jwt.verify(header.slice(7), JWT_SECRET()) as AuthUser;
-    const workspace = await findWorkspaceById(payload.workspace_id);
-    if (!workspace || workspace.status !== "active") {
-      res.status(401).json({ error: "Workspace not found" });
-      return;
-    }
-    req.user = payload;
-    req.workspace = workspace;
-    next();
+    payload = jwt.verify(header.slice(7), JWT_SECRET()) as AuthUser;
   } catch {
     res.status(401).json({ error: "Invalid or expired token" });
+    return;
   }
+  const workspace = findWorkspaceById(payload.workspace_id);
+  if (!workspace) {
+    res.status(401).json({ error: "Workspace not found" });
+    return;
+  }
+  // Role, firm, and active flag come from the database, not the token.
+  const current = await queryWorkspace<{
+    role: UserRole;
+    name: string;
+    active: boolean;
+    assigned_firm_id: string | null;
+  }>(
+    workspace,
+    `SELECT role, name, active, assigned_firm_id FROM users WHERE user_id = $1`,
+    [payload.user_id],
+  );
+  const row = current.rows[0];
+  if (!row || !row.active) {
+    res.status(401).json({ error: "Account is disabled" });
+    return;
+  }
+  req.user = {
+    ...payload,
+    role: row.role,
+    name: row.name,
+    assigned_firm_id: row.assigned_firm_id,
+  };
+  req.workspace = workspace;
+  next();
 }
 
 export function requireRoles(...roles: UserRole[]) {

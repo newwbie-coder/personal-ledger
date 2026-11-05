@@ -1,6 +1,6 @@
 /**
  * Local demo Postgres bootstrap (no Docker required).
- * Starts embedded PostgreSQL, creates control + workspace DBs.
+ * Starts embedded PostgreSQL and creates the ledger database.
  */
 import EmbeddedPostgres from "embedded-postgres";
 import fs from "node:fs";
@@ -34,7 +34,7 @@ async function main() {
   console.log(`Starting embedded Postgres on port ${port}...`);
   await pg.start();
 
-  for (const db of ["ledger_control", "ledger_workspace"]) {
+  for (const db of ["ledger"]) {
     try {
       await pg.createDatabase(db);
       console.log(`Created database: ${db}`);
@@ -50,8 +50,7 @@ async function main() {
 
   console.log("");
   console.log("Embedded Postgres is running.");
-  console.log(`CONTROL_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:${port}/ledger_control`);
-  console.log(`Workspace DB host=127.0.0.1 port=${port} database=ledger_workspace user=postgres password=postgres`);
+  console.log(`DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:${port}/ledger`);
   console.log("");
   console.log("Keep this process open while using the demo. Ctrl+C to stop.");
 

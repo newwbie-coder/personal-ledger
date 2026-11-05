@@ -20,13 +20,14 @@ export function setToken(token: string | null) {
   else localStorage.removeItem("ledger_token");
 }
 
-export function getWorkspaceSlug() {
-  return localStorage.getItem("ledger_workspace") ?? "";
-}
-
-export function setWorkspaceSlug(slug: string | null) {
-  if (slug) localStorage.setItem("ledger_workspace", slug);
-  else localStorage.removeItem("ledger_workspace");
+export function downloadJson(value: unknown, filename: string) {
+  const blob = new Blob([JSON.stringify(value, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {

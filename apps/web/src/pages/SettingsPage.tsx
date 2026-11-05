@@ -3,7 +3,8 @@ import { Link } from "react-router-dom";
 import { BottomNav } from "../components/BottomNav";
 import { useAuth } from "../auth";
 import { useFirm } from "../firm";
-import { api, ApiError } from "../lib/api";
+import { api, ApiError, downloadJson, formatDate } from "../lib/api";
+import { useViewMode } from "../view-mode";
 
 interface AppUser {
   user_id: string;
@@ -16,12 +17,27 @@ interface AppUser {
 
 interface LicenseStatus {
   license_id: string | null;
-  company_uuid: string | null;
-  workspace_slug?: string;
-  last_validation: string | null;
+  company_name?: string;
+  edition?: string;
+  issued_at?: string;
   valid: boolean;
   maximum_users?: number;
 }
+
+interface ChainReport {
+  ok: boolean;
+  checked_links: number;
+  checked_records: number;
+  problems: Array<{ kind: keyof typeof PROBLEM_LABEL; table?: string; seq?: number }>;
+  verified_at: string;
+}
+
+const PROBLEM_LABEL = {
+  broken_link: "Chain link broken",
+  altered: "Record changed",
+  missing: "Record deleted",
+  untracked: "Record added outside the app",
+} as const;
 
 interface FirmRow {
   firm_id: string;
@@ -31,6 +47,7 @@ interface FirmRow {
 
 export function SettingsPage() {
   const { user, workspace, logout } = useAuth();
+  const { showBalance } = useViewMode();
   const { refreshFirms } = useFirm();
   const isOwner = user?.role === "owner";
   const canManageFirms = user?.role === "owner" || user?.role === "manager";
@@ -60,28 +77,21 @@ export function SettingsPage() {
   });
   const [busy, setBusy] = useState(false);
   const [installHint, setInstallHint] = useState(false);
-  const [moveMsg, setMoveMsg] = useState("");
-  const [showMove, setShowMove] = useState(false);
-  const [moveForm, setMoveForm] = useState({
-    host: "",
-    port: "5432",
-    database: "postgres",
-    username: "postgres",
-    password: "",
-    db_provider: "supabase" as "supabase" | "existing" | "self_hosted",
-  });
+  const [chainReport, setChainReport] = useState<ChainReport | null>(null);
 
   async function load() {
     try {
       const firmData = await api<{ firms: FirmRow[] }>("/firms?include_archived=true");
       setFirms(firmData.firms);
       if (isOwner) {
-        const [u, l] = await Promise.all([
+        const [u, l, c] = await Promise.all([
           api<{ users: AppUser[] }>("/users"),
           api<LicenseStatus>("/users/license-status"),
+          api<{ report: ChainReport | null }>("/chain/report"),
         ]);
         setUsers(u.users);
         setLicense(l);
+        setChainReport(c.report);
       } else if (canManageFirms) {
         const l = await api<LicenseStatus>("/users/license-status");
         setLicense(l);
@@ -244,74 +254,26 @@ export function SettingsPage() {
     }
   }
 
-  async function runEncryptMigrate() {
-    if (!confirm("Seal existing ledger fields with license-bound encryption? Safe to re-run.")) {
-      return;
-    }
+  async function runVerify() {
     setBusy(true);
     setError("");
-    setMoveMsg("");
     try {
-      const r = await api<{ sealed_rows: number; created_dek: boolean }>(
-        "/workspace/encrypt-migrate",
-        { method: "POST", body: "{}" },
-      );
-      setMoveMsg(
-        `Encryption ready. Sealed fields: ${r.sealed_rows}${r.created_dek ? " (new data key created)" : ""}.`,
-      );
+      const r = await api<{ report: ChainReport }>("/chain/verify", { method: "POST", body: "{}" });
+      setChainReport(r.report);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Encrypt migrate failed");
+      setError(err instanceof ApiError ? err.message : "Verify failed");
     } finally {
       setBusy(false);
     }
   }
 
-  async function testMoveDb() {
-    setBusy(true);
+  async function downloadKit() {
     setError("");
-    setMoveMsg("");
     try {
-      await api("/workspace/test-db", {
-        method: "POST",
-        body: JSON.stringify({
-          ...moveForm,
-          port: Number(moveForm.port) || 5432,
-        }),
-      });
-      setMoveMsg("Connection OK. After pg_dump/restore into this DB, use Attach.");
+      const r = await api<{ recovery_kit: unknown }>("/box/recovery-kit");
+      downloadJson(r.recovery_kit, "ledger-recovery-kit.json");
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Test failed");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function swapMoveDb(e: FormEvent) {
-    e.preventDefault();
-    if (
-      !confirm(
-        "Point this workspace at the new database? Ciphertext must already be copied (see MOVE_DATABASE.md).",
-      )
-    ) {
-      return;
-    }
-    setBusy(true);
-    setError("");
-    setMoveMsg("");
-    try {
-      const r = await api<{ hint?: string }>("/workspace/swap-db", {
-        method: "POST",
-        body: JSON.stringify({
-          ...moveForm,
-          port: Number(moveForm.port) || 5432,
-        }),
-      });
-      setMoveMsg(r.hint ?? "Database attached. Sign out and back in to confirm.");
-      setShowMove(false);
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Attach failed");
-    } finally {
-      setBusy(false);
+      setError(err instanceof ApiError ? err.message : "Download failed");
     }
   }
 
@@ -347,9 +309,9 @@ export function SettingsPage() {
           <div className="list-row">
             <div>
               <div className="row-title">{workspace?.company_name}</div>
-              <div className="row-sub">slug: {workspace?.slug}</div>
+              <div className="row-sub">Hosted on your office box</div>
             </div>
-            <span className="badge">Workspace</span>
+            <span className="badge">Company</span>
           </div>
           <div className="list-row">
             <div>
@@ -358,7 +320,10 @@ export function SettingsPage() {
             </div>
             <span className="badge badge-accent">{user?.role}</span>
           </div>
-          <Link to="/account" className="btn btn-secondary btn-block" style={{ marginTop: 14, textDecoration: "none" }}>
+          <button className="btn btn-secondary btn-block" style={{ marginTop: 14 }} type="button" onClick={showBalance}>
+            Show balance only
+          </button>
+          <Link to="/account" className="btn btn-secondary btn-block" style={{ marginTop: 8, textDecoration: "none" }}>
             App PIN &amp; profile
           </Link>
           <button className="btn btn-secondary btn-block" style={{ marginTop: 8 }} type="button" onClick={logout}>
@@ -377,6 +342,7 @@ export function SettingsPage() {
             <div className="muted" style={{ fontSize: 13, marginTop: 8 }}>
               {license.license_id ?? "—"}
               {license.maximum_users != null ? ` · Max users: ${license.maximum_users}` : ""}
+              {" · Checked on this box, never expires"}
             </div>
           </div>
         ) : null}
@@ -497,92 +463,36 @@ export function SettingsPage() {
           <>
             <div className="section-title" style={{ margin: "8px 0" }}>Data protection</div>
             <p className="muted" style={{ fontSize: 13, marginTop: 0, lineHeight: 1.5 }}>
-              Ledger fields are sealed with a license-bound key. Without a valid license activation,
-              database dumps are not useful. Moving host does not require a new license.
+              Everything lives on this office box. Every money record is fingerprint-chained, so any
+              edit or deletion outside the app is detected.
             </p>
-            {moveMsg ? <div className="success-banner">{moveMsg}</div> : null}
+            {chainReport ? (
+              <div className={chainReport.ok ? "success-banner" : "error-banner"}>
+                {chainReport.ok
+                  ? `Ledger fingerprint OK · ${chainReport.checked_links} records · checked ${formatDate(chainReport.verified_at)}`
+                  : `Ledger fingerprint BROKEN · ${chainReport.problems.length} problem(s) found`}
+              </div>
+            ) : null}
+            {chainReport && !chainReport.ok ? (
+              <div className="card-surface card-flush" style={{ marginBottom: 12 }}>
+                {chainReport.problems.map((p, i) => (
+                  <div key={i} className="list-row">
+                    <div className="row-sub">
+                      {PROBLEM_LABEL[p.kind]} · {p.table ?? "chain"}
+                      {p.seq ? ` · record ${p.seq}` : ""}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : null}
             <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 14 }}>
-              <button className="btn btn-secondary" type="button" disabled={busy} onClick={() => void runEncryptMigrate()}>
-                Seal / migrate encryption
+              <button className="btn btn-secondary" type="button" disabled={busy} onClick={() => void runVerify()}>
+                {busy ? "Checking…" : "Verify ledger"}
               </button>
-              <button className="btn btn-secondary" type="button" disabled={busy} onClick={() => setShowMove((v) => !v)}>
-                {showMove ? "Cancel move" : "Move database"}
+              <button className="btn btn-secondary" type="button" disabled={busy} onClick={() => void downloadKit()}>
+                Download recovery kit
               </button>
             </div>
-            {showMove ? (
-              <form className="card-surface" style={{ marginBottom: 14 }} onSubmit={swapMoveDb}>
-                <p className="field-hint" style={{ marginTop: 0 }}>
-                  1) Copy data with pg_dump/restore (see MOVE_DATABASE.md). 2) Test connection. 3) Attach.
-                  Assisted moves by our team are chargeable when self-serve is impractical.
-                </p>
-                <div className="field">
-                  <label>Provider</label>
-                  <select
-                    value={moveForm.db_provider}
-                    onChange={(e) =>
-                      setMoveForm({
-                        ...moveForm,
-                        db_provider: e.target.value as typeof moveForm.db_provider,
-                      })
-                    }
-                  >
-                    <option value="supabase">Supabase</option>
-                    <option value="existing">Existing PostgreSQL</option>
-                    <option value="self_hosted">Self-hosted</option>
-                  </select>
-                </div>
-                <div className="field">
-                  <label>Host</label>
-                  <input
-                    value={moveForm.host}
-                    onChange={(e) => setMoveForm({ ...moveForm, host: e.target.value })}
-                    required
-                    placeholder="aws-0-….pooler.supabase.com"
-                  />
-                </div>
-                <div className="field">
-                  <label>Port</label>
-                  <input
-                    value={moveForm.port}
-                    onChange={(e) => setMoveForm({ ...moveForm, port: e.target.value })}
-                    required
-                  />
-                </div>
-                <div className="field">
-                  <label>Database</label>
-                  <input
-                    value={moveForm.database}
-                    onChange={(e) => setMoveForm({ ...moveForm, database: e.target.value })}
-                    required
-                  />
-                </div>
-                <div className="field">
-                  <label>Username</label>
-                  <input
-                    value={moveForm.username}
-                    onChange={(e) => setMoveForm({ ...moveForm, username: e.target.value })}
-                    required
-                  />
-                </div>
-                <div className="field">
-                  <label>Password</label>
-                  <input
-                    type="password"
-                    value={moveForm.password}
-                    onChange={(e) => setMoveForm({ ...moveForm, password: e.target.value })}
-                    required
-                  />
-                </div>
-                <div style={{ display: "flex", gap: 8 }}>
-                  <button className="btn btn-secondary" type="button" disabled={busy} onClick={() => void testMoveDb()}>
-                    Test
-                  </button>
-                  <button className="btn btn-primary" style={{ flex: 1 }} disabled={busy} type="submit">
-                    Attach database
-                  </button>
-                </div>
-              </form>
-            ) : null}
           </>
         ) : null}
 
